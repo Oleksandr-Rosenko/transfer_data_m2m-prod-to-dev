@@ -408,7 +408,7 @@ class EndToEndTeltonikaTests(unittest.TestCase):
         job.start()
         wait_job(job)
         self.assertEqual((job.status, job.total), ("done", 0))
-        self.assertIn("немає", job.message)
+        self.assertIn("немає", job.note)
 
     def test_check_connection(self):
         srv = TeltonikaMock()

@@ -66,7 +66,8 @@ class TransferJob:
     def __init__(self, cfg: TransferConfig):
         self.cfg = cfg
         self.status = "idle"            # idle | running | done | stopped | error
-        self.message = ""
+        self.message = ""               # поточний етап (поки виконується) або причина помилки
+        self.note = ""                  # зауваження до завершеного переносу (порожній період, неповна обробка)
         self.total = 0
         self.ok = 0
         self.failed_points: list[Point] = []
@@ -136,6 +137,7 @@ class TransferJob:
         self._stop.clear()
         self._conn_fail = self._reject_streak = 0
         self.status = "running"
+        self.note = ""
         self.message = "Повторна відправка невдалих повідомлень"
         self.started_at = time.time() - self.elapsed
         self.finished_at = None
@@ -174,7 +176,7 @@ class TransferJob:
             total = min(total, cfg.limit)
         self.total = total
         if total == 0:
-            self.message = "У вибраному періоді повідомлень немає"
+            self.note = "У вибраному періоді повідомлень немає."
             return
         if cfg.shift:
             last = c.positions_page(cfg.device_id, cfg.date_from, cfg.date_to, 1, 1, "DESC")["items"]
@@ -201,7 +203,8 @@ class TransferJob:
             if remaining is not None and remaining <= 0:
                 break
         if self.processed < self.total and not self._stop.is_set():
-            self.message = f"Оброблено {self.processed} із {self.total}: решта точок без часу або сервер віддав менше"
+            self.note = (f"Оброблено {self.processed} із {self.total}: решта повідомлень без часу, "
+                         "або Prod віддав менше, ніж обіцяв.")
 
     def _run_points(self, pts: list[Point]) -> None:
         self._sender = make_sender(self.cfg)

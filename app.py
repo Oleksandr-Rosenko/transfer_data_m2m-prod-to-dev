@@ -272,16 +272,25 @@ def progress_page() -> None:
             p2.markdown(f"### {fmt_n(job.processed)} / {fmt_n(job.total)} повідомлень")
             st.progress(min(1.0, job.percent / 100))
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Швидкість", f"{fmt_n(job.speed)} повід./с")
+            m1.metric("Швидкість, пов./с", fmt_n(job.speed))
             m2.metric("Минуло", fmt_dur(job.elapsed))
             m3.metric("Залишилось ≈", fmt_dur(job.eta))
             m4.metric("Помилок", fmt_n(job.failed))
             if job.status == "running":
                 st.info(job.message or "Виконується")
             elif job.status == "done":
-                st.success(f"Готово: передано {fmt_n(job.ok)} із {fmt_n(job.total)}. " + (job.message or ""))
+                if job.total == 0:
+                    st.info(job.note or "У вибраному періоді повідомлень немає.")
+                elif job.failed:
+                    st.warning(f"Перенос завершено з помилками: передано {fmt_n(job.ok)} із {fmt_n(job.total)}, "
+                               f"не передано {fmt_n(job.failed)}. Натисніть «Повторити невдалі» або перегляньте журнал нижче.")
+                else:
+                    st.success(f"Перенос завершено: усі {fmt_n(job.ok)} повідомлень передано за {fmt_dur(job.elapsed)}.")
+                if job.note and job.total:
+                    st.warning(job.note)
                 if job.first_ts_ms:
-                    st.write(f"Дивіться на dev за інтервал: {fmt_ms(job.first_ts_ms)} → {fmt_ms(job.last_ts_ms)}")
+                    st.markdown(f"**Шукайте на dev** в об'єкті `{cfg.imei}` за період  \n"
+                                f"{fmt_ms(job.first_ts_ms)} → {fmt_ms(job.last_ts_ms)}")
             elif job.status == "stopped":
                 st.warning(f"Зупинено користувачем. Передано {fmt_n(job.ok)} із {fmt_n(job.total)}.")
             elif job.status == "error":
