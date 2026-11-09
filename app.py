@@ -12,6 +12,9 @@ import streamlit as st
 
 from m2m_replay.client import M2MClient
 from m2m_replay.errors import ApiError, SendError
+from m2m_replay.order import (
+    export_rows, fmt_local, rows_to_csv, scan_pages, segment_reason,
+)
 from m2m_replay.replay import PROTOCOLS, TransferConfig, TransferJob, build_preview, check_connection
 
 try:
@@ -28,6 +31,7 @@ S.setdefault("stage", "setup")      # setup | progress
 S.setdefault("job", None)
 S.setdefault("preview", None)
 S.setdefault("search_cache", {})
+S.setdefault("order_report", None)
 
 
 # ---------------------------------------------------------------- допоміжне
@@ -202,6 +206,12 @@ def setup_page() -> None:
                 start = end - (pv["last"] - pv["first"])
                 st.caption(f"Інтервал на dev буде: {fmt_dt(start)} → {fmt_dt(end)}")
         all_params = st.checkbox("Переносити всі параметри, а не лише напругу", value=True, key="all_params")
+        sort_by_time = st.checkbox(
+            "Впорядкувати точки за UTC-часом перед відправкою", value=True, key="sort_time",
+            help="Якщо Prod віддає точки не за хронологією (наприклад, у ніч переходу на зимовий час, коли година "
+                 "03:00–03:59 повторюється), dev отримає їх у правильному порядку й порахує пробіг без «стрибків». "
+                 "Перевірити період можна у вкладці «Діагностика порядку точок».",
+        )
         o1, o2 = st.columns(2)
         batch = o1.number_input("Записів у пакеті", 1, 255, 100, key="batch")
         test_run = o2.checkbox("Пробний запуск: лише перші 20 повідомлень", key="test_run")
@@ -221,7 +231,7 @@ def setup_page() -> None:
             host=host.strip(), port=int(port_s) if port_ok else 0, imei=imei, shift=shift_mode == "shift",
             shift_minutes=int(shift_min), batch_size=int(batch), all_params=all_params,
             include_platform=include_platform, wialon_version=w_version, limit=20 if test_run else None,
-            source_name=names.get(device_id, ""),
+            source_name=names.get(device_id, ""), sort_by_time=sort_by_time,
         )
 
     dest_ok = bool(host.strip()) and port_ok and imei_ok
@@ -288,6 +298,12 @@ def progress_page() -> None:
                     st.success(f"Перенос завершено: усі {fmt_n(job.ok)} повідомлень передано за {fmt_dur(job.elapsed)}.")
                 if job.note and job.total:
                     st.warning(job.note)
+                if job.reordered:
+                    st.info(f"Перед відправкою впорядковано за UTC: {fmt_n(job.reordered)} точок змінили місце "
+                            "(Prod віддав їх не за хронологією).")
+                if job.late_points:
+                    st.warning(f"{fmt_n(job.late_points)} точок мають відкат часу більший за вікно впорядкування "
+                               "й відправлені як є. Перевірте період у вкладці «Діагностика порядку точок».")
                 if job.first_ts_ms:
                     st.markdown(f"**Шукайте на dev** в об'єкті `{cfg.imei}` за період  \n"
                                 f"{fmt_ms(job.first_ts_ms)} → {fmt_ms(job.last_ts_ms)}")
@@ -325,9 +341,114 @@ def progress_page() -> None:
     live()
 
 
+# ---------------------------------------------------------------- вкладка: діагностика порядку точок
+def order_page() -> None:
+    client: M2MClient | None = S.client
+    connected = bool(client and client.token)
+    st.title("Діагностика порядку точок")
+    st.caption(
+        "Перевіряє, чи віддає Prod точки об'єкта за хронологією (UTC). Типовий випадок: у ніч переходу на зимовий час "
+        "година 03:00–03:59 повторюється, точки двох годин перемішуються, і трек стрибає на десятки кілометрів."
+    )
+    if not connected:
+        st.info("Увійдіть у Prod у бічній панелі ліворуч.")
+
+    with st.container(border=True):
+        q = st.text_input("Пошук об'єкта", placeholder="Назва або IMEI", key="ord_q", disabled=not connected)
+        devices: list[dict] = []
+        if connected:
+            try:
+                devices = search_devices(client, q)
+            except ApiError as e:
+                st.error(f"Не вдалося отримати список об'єктів: {e}")
+        names = {d["id"]: d["name"] for d in devices}
+        device_id = st.selectbox(
+            "Об'єкт", options=list(names), format_func=lambda i: f"{names[i]} (ID {i})",
+            disabled=not devices, key="ord_device",
+        )
+        today = datetime.now(LOCAL_TZ).date()
+        a, b = st.columns(2)
+        d_from = a.date_input("Від", value=today - timedelta(days=30), key="ord_d_from")
+        t_from = a.time_input("Година", value=dtime(0, 0), key="ord_t_from", step=60)
+        d_to = b.date_input("До", value=today, key="ord_d_to")
+        t_to = b.time_input("Година ", value=dtime(23, 59), key="ord_t_to", step=60)
+        period_ok = datetime.combine(d_from, t_from) < datetime.combine(d_to, t_to)
+        if not period_ok:
+            st.error("Початок періоду має бути раніше за кінець.")
+        st.caption("Лише читання: нічого не змінюється ні на Prod, ні на dev. Період — за київським часом.")
+
+    if st.button("Перевірити порядок", type="primary", disabled=not (connected and device_id and period_ok)):
+        bar = st.progress(0.0, text="Читаю точки з Prod...")
+        date_from, date_to = to_iso(d_from, t_from), to_iso(d_to, t_to, end=True)
+        try:
+            first = client.positions_page(device_id, date_from, date_to, 1)
+            total = int(first.get("total") or len(first.get("items") or [])) or 1
+
+            def on_progress(done: int) -> None:
+                bar.progress(min(1.0, done / total), text=f"Прочитано {fmt_n(done)} із {fmt_n(total)}")
+
+            rep = scan_pages(client.iter_positions(device_id, date_from, date_to, first_page=first),
+                             tz=LOCAL_TZ, on_progress=on_progress)
+        except ApiError as e:
+            bar.empty()
+            st.error(f"Не вдалося отримати точки: {e}")
+        else:
+            bar.empty()
+            S.order_report = {"rep": rep, "name": names.get(device_id, str(device_id)), "from": date_from, "to": date_to}
+
+    res = S.get("order_report")
+    if not res:
+        return
+    rep = res["rep"]
+    st.subheader(f"Результат: {res['name']}")
+    st.caption(f"{res['from'][:16].replace('T', ' ')} → {res['to'][:16].replace('T', ' ')}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Точок", fmt_n(rep.total if rep.total else len(rep.points)))
+    m2.metric("Час іде назад", fmt_n(rep.out_of_order))
+    m3.metric("Фрагментів", fmt_n(len(rep.segments)))
+    m4.metric("Координати 0,0", fmt_n(rep.zero_coords))
+
+    if not rep.points:
+        st.warning("У вибраному періоді точок немає.")
+        return
+    if not rep.segments:
+        st.success("Порядок правильний: усі точки йдуть за зростанням UTC-часу.")
+    else:
+        st.error(f"Порядок порушено, фрагментів: {len(rep.segments)}. Трек на мапі буде «зигзагом» між двома місцями.")
+        st.dataframe(pd.DataFrame([{
+            "Початок (Київ)": fmt_local(s.lo_ms, LOCAL_TZ, with_offset=True),
+            "Кінець (Київ)": fmt_local(s.hi_ms, LOCAL_TZ, with_offset=True),
+            "Порушень": s.events,
+            "Макс. відкат, хв": round(s.max_back_ms / 60000),
+            "Стрибків координат": s.jumps,
+            "Імовірна причина": segment_reason(s),
+        } for s in rep.segments]), hide_index=True)
+        st.markdown(
+            "**Що робити.** Для переносу на dev залиште ввімкненою галочку «Впорядкувати точки за UTC-часом» у "
+            "вкладці «Перенос»: dev отримає точки в хронологічному порядку. Для платформи це означає, що "
+            "ендпойнт точок/треку/експорту треба сортувати за UTC-часом фіксації, а не за локальним. CSV нижче "
+            "показує ці точки в правильному порядку й де вони стояли у відповіді API."
+        )
+        rows = export_rows(rep, LOCAL_TZ)
+        st.download_button("Завантажити CSV проблемних відрізків (±2 год)", rows_to_csv(rows),
+                           file_name=f"order_{res['name']}.csv", mime="text/csv")
+    if rep.jumps_other:
+        with st.expander(f"Інші стрибки координат, не пов'язані з порядком часу: {fmt_n(rep.jumps_other)}"):
+            st.caption("Нереальна швидкість між сусідніми точками (шум GPS, втрата фіксу). Перші 30.")
+            st.dataframe(pd.DataFrame([{"Час (Київ)": fmt_local(ts, LOCAL_TZ), "Стрибок, км": round(km, 1)}
+                                       for ts, km in rep.jump_samples]), hide_index=True)
+    if rep.zero_coords:
+        st.caption(f"Точки з координатами 0,0 ({fmt_n(rep.zero_coords)}) — це невалідний GPS-фікс; "
+                   "їх варто виключати з треку й звітів.")
+
+
 # ---------------------------------------------------------------- запуск
 sidebar_login()
-if S.stage == "progress" and S.job is not None:
-    progress_page()
-else:
-    setup_page()
+tab_transfer, tab_order = st.tabs(["Перенос Prod → Dev", "Діагностика порядку точок"])
+with tab_transfer:
+    if S.stage == "progress" and S.job is not None:
+        progress_page()
+    else:
+        setup_page()
+with tab_order:
+    order_page()
