@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
-from .models import Point, position_time
+from .models import Point, parse_attributes, position_time
 
 HOUR_MS = 3_600_000
 DEFAULT_WINDOW_MS = 2 * HOUR_MS     # перемішування при переході годин — до 1 год; беремо із запасом
@@ -121,8 +121,11 @@ class OrderReport:
     jumps_other: int = 0                         # стрибки координат, не пов'язані з порядком часу
     jump_samples: list[tuple[int, float]] = field(default_factory=list)   # (ts_ms, км), перші 30
     segments: list[OrderSegment] = field(default_factory=list)
-    # (№ у відповіді API, ts_ms, lat, lon, швидкість) — для експорту
-    points: list[tuple[int, int, float | None, float | None, float | None]] = field(default_factory=list)
+    # (№ у відповіді API, ts_ms, lat, lon, швидкість, id точки, totalDistance у метрах) — для експорту та перевірок
+    points: list[tuple] = field(default_factory=list)
+    attr_km: float | None = None                 # пробіг за атрибутом totalDistance (за хронологією, без скидань лічильника)
+    path_km: float | None = None                 # довжина треку за координатами (за хронологією)
+    td_decreases: int = 0                        # скільки разів totalDistance зменшується за хронологією
 
 
 def _f(x) -> float | None:
@@ -150,7 +153,8 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
                 continue
             ts = int(round(t.timestamp() * 1000))
             lat, lon = _f(p.get("latitude")), _f(p.get("longitude"))
-            rep.points.append((idx, ts, lat, lon, _f(p.get("speed"))))
+            td = _f(parse_attributes(p.get("attributes")).get("totalDistance"))
+            rep.points.append((idx, ts, lat, lon, _f(p.get("speed")), p.get("id"), td))
             has_ll = lat is not None and lon is not None
             if has_ll and lat == 0 and lon == 0:
                 rep.zero_coords += 1
@@ -176,7 +180,40 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
         if on_progress:
             on_progress(idx)
     rep.total = idx
+    _finalize(rep)
     return rep
+
+
+MAX_STEP_M = 200_000    # більший приріст totalDistance вважаємо скиданням лічильника, а не пробігом
+
+
+def _finalize(rep: OrderReport) -> None:
+    """Пробіг за totalDistance і довжина треку — обидва за хронологією. Різниця видає зіпсований розрахунок пробігу."""
+    chrono = sorted(rep.points, key=lambda r: (r[1], r[0]))
+    attr_m, seen_td, path = 0.0, False, 0.0
+    prev_td = prev_ll = None
+    for _idx, _ts, lat, lon, _spd, _pid, td in chrono:
+        if td is not None:
+            if prev_td is not None:
+                step = td - prev_td
+                if 0 <= step <= MAX_STEP_M:
+                    attr_m += step
+                elif -MAX_STEP_M <= step < 0:
+                    rep.td_decreases += 1
+            prev_td, seen_td = td, True
+        if lat is not None and lon is not None and not (lat == 0 and lon == 0):
+            if prev_ll is not None:
+                path += haversine_km(prev_ll[0], prev_ll[1], lat, lon)
+            prev_ll = (lat, lon)
+    rep.attr_km = attr_m / 1000 if seen_td else None
+    rep.path_km = path
+
+
+def mileage_mismatch(rep: OrderReport) -> bool:
+    """Пробіг за totalDistance помітно не збігається з довжиною треку (рахувався не за хронологією?)."""
+    if rep.attr_km is None or not rep.path_km or rep.path_km < 5:
+        return False
+    return not 0.75 <= rep.attr_km / rep.path_km <= 1.5
 
 
 def _add_event(rep: OrderReport, prev_ts: int, ts: int, is_jump: bool, tz: ZoneInfo) -> None:
@@ -217,7 +254,7 @@ def export_rows(rep: OrderReport, tz: ZoneInfo | None = None, margin_ms: int = D
     rank = {r[0]: n for n, r in enumerate(order, 1)}
     spans = [(s.lo_ms - margin_ms, s.hi_ms + margin_ms) for s in rep.segments]
     rows = []
-    for idx, ts, lat, lon, spd in order:
+    for idx, ts, lat, lon, spd, _pid, _td in order:
         if any(a <= ts <= b for a, b in spans):
             rows.append({
                 "№ у правильному порядку": rank[idx],

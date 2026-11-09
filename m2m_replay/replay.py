@@ -132,6 +132,15 @@ class TransferJob:
         self._thread = threading.Thread(target=self._guard, args=(self._run_full,), daemon=True)
         self._thread.start()
 
+    def start_stream(self, chunks, total: int) -> None:
+        """Відправити готові точки (ітератор списків Point) без читання з API й без впорядкування: як є."""
+        self.total = total
+        self.status = "running"
+        self.started_at = time.time()
+        self.message = "Відправляю повідомлення"
+        self._thread = threading.Thread(target=self._guard, args=(lambda: self._run_stream(chunks),), daemon=True)
+        self._thread.start()
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -217,6 +226,14 @@ class TransferJob:
         if self.processed < self.total and not self._stop.is_set():
             self.note = (f"Оброблено {self.processed} із {self.total}: решта повідомлень без часу, "
                          "або Prod віддав менше, ніж обіцяв.")
+
+    def _run_stream(self, chunks) -> None:
+        self._sender = make_sender(self.cfg)
+        self._sender.connect()
+        for pts in chunks:
+            if self._stop.is_set():
+                return
+            self._send_points(pts)
 
     def _run_points(self, pts: list[Point]) -> None:
         self._sender = make_sender(self.cfg)
