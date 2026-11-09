@@ -146,6 +146,7 @@ class OrderReport:
     jump_samples: list[tuple[int, float]] = field(default_factory=list)   # (ts_ms, км), перші 30
     time_fixed: int = 0                          # точок, чий час на платформі зсунуто на 1 год (виправлено за годинником трекера)
     jumps_in_fold: int = 0                       # з них у годині, що повторюється (ознака «віяла» при впорядкованому часі)
+    fixed_samples: list[dict] = field(default_factory=list)   # перші точки з виправленим часом: як їх віддає API
     jump_raw: list[dict] = field(default_factory=list)   # сирі поля часу двох сусідніх точок біля перших стрибків
     segments: list[OrderSegment] = field(default_factory=list)
     # (№ у відповіді API, ts_ms, lat, lon, швидкість, id точки, totalDistance у метрах) — для експорту та перевірок
@@ -188,6 +189,8 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
                 rep.no_time += 1
                 continue
             rep.time_fixed += fixed
+            if fixed and len(rep.fixed_samples) < 5:
+                rep.fixed_samples.append(_raw_times(p))
             lat, lon = _f(p.get("latitude")), _f(p.get("longitude"))
             td = _f(parse_attributes(p.get("attributes")).get("totalDistance"))
             rep.points.append((idx, ts, lat, lon, _f(p.get("speed")), p.get("id"), td))

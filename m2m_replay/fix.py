@@ -357,7 +357,16 @@ class FixJob:
             "td_decreases": rep.td_decreases, "mileage_mismatch": mileage_mismatch(rep),
         }
         if rep.segments:
-            raise FixError(f"Після виправлення порядок усе ще порушений ({len(rep.segments)} фрагм.)")
+            from datetime import datetime as _dt, timezone as _tz
+
+            def utc(sec):
+                return _dt.fromtimestamp(float(sec), tz=_tz.utc).strftime("%H:%M:%S") if sec is not None else "—"
+            samples = "; ".join(f"id {r['id']}: час на платформі {r['deviceTime']}, годинник трекера {utc(r['sns16486'])} UTC"
+                                for r in rep.fixed_samples[:3])
+            raise FixError(
+                f"Після виправлення порядок усе ще порушений ({len(rep.segments)} фрагм., {rep.time_fixed} точок із "
+                f"часом, що відстає на 1 год від годинника трекера). Платформа, імовірно, знову зберегла час "
+                f"неправильно. Приклади: {samples or '—'}")
         if self.strict_mileage and self.verify_info["mileage_mismatch"]:
             raise FixError("Порядок виправлено, але пробіг за totalDistance не збігається з довжиною треку")
 
