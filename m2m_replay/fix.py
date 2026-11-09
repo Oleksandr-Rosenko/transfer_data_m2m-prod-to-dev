@@ -50,16 +50,17 @@ class Interval:
 
     @staticmethod
     def _iso(ms: int) -> str:
-        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+        """Як у запитах інтерфейсу платформи й у перевірці: київський час із зсувом, до секунди."""
+        dt = datetime.fromtimestamp(ms / 1000, tz=get_local_tz())
+        return dt.replace(microsecond=0).isoformat()
 
     @property
     def iso_from(self) -> str:
-        return self._iso(self.from_ms)
+        return self._iso(self.from_ms // 1000 * 1000)                    # вниз до секунди
 
     @property
     def iso_to(self) -> str:
-        return self._iso(self.to_ms)
+        return self._iso(-(-self.to_ms // 1000) * 1000)                  # вгору до секунди
 
 
 @dataclass
@@ -128,7 +129,9 @@ def snapshot(client: M2MClient, device_id: int, iv: Interval, path: str) -> list
                 if pid is None or t is None:
                     raise FixError("Точка без id або часу: безпечну резервну копію зробити неможливо")
                 if not lo <= t.timestamp() * 1000 <= hi:
-                    raise FixError("API dev повернуло точку поза вибраним інтервалом: нічого не видаляю")
+                    raise FixError(
+                        f"API повернуло точку (id {pid}, час {p.get('deviceTime')}) поза вибраним інтервалом "
+                        f"{iv.iso_from} → {iv.iso_to}. Нічого не видаляю")
                 if int(pid) in seen:
                     raise FixError(f"Дублікат id {pid} у відповіді API dev: нічого не видаляю")
                 seen.add(int(pid))

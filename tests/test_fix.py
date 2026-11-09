@@ -182,7 +182,12 @@ class PlanTests(unittest.TestCase):
         end = ms_of("2026-10-31T21:59:59Z")
         to_end = plan_interval(rep, "to_end", period_end_ms=end)
         self.assertEqual((to_end.from_ms, to_end.to_ms), (hull.from_ms, end))
-        self.assertEqual(Interval(0, 1500).iso_to, "1970-01-01T00:00:01.500Z")
+        # формат як у запитах інтерфейсу: київський час зі зсувом (до секунди; початок вниз, кінець вгору)
+        iv2 = Interval(ms_of("2026-10-24T23:56:00.400Z"), ms_of("2026-10-25T00:04:00.400Z"))
+        self.assertEqual((iv2.iso_from, iv2.iso_to), ("2026-10-25T02:56:00+03:00", "2026-10-25T03:04:01+03:00"))
+        # друга година 03:xx має зсув +02:00, тож момент однозначний
+        self.assertEqual(Interval(ms_of("2026-10-25T01:04:00Z"), ms_of("2026-10-25T01:05:00Z")).iso_from,
+                         "2026-10-25T03:04:00+02:00")
         with self.assertRaises(FixError):
             plan_interval(scan_pages(pages([make_position(i, FOLD_B) for i in range(5)]), get_local_tz()), "hull")
 
