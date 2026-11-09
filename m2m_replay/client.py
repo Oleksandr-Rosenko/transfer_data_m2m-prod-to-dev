@@ -23,6 +23,7 @@ class M2MClient:
         self.refresh_token: str | None = None
         self.email: str | None = None
         self._password: str | None = None  # лише в пам'яті сесії — для повторного входу, ніде не зберігається
+        self.read_only = False  # True: request() пропускає лише GET (клієнт Prod у застосунку лише читає)
         self._lock = threading.Lock()
         self._local = threading.local()
 
@@ -76,6 +77,8 @@ class M2MClient:
             return False
 
     def request(self, method, path, params=None, json_data=None, retries=3):
+        if self.read_only and str(method).upper() != "GET":
+            raise ApiError(f"Клієнт лише для читання: {method} {path} заблоковано")
         last_exc = None
         for attempt in range(retries + 1):
             tok = self.token
@@ -167,3 +170,15 @@ class M2MClient:
                 yield window.popleft().result()
         finally:
             ex.shutdown(wait=False, cancel_futures=True)
+
+    def delete_positions(self, did: int, ids: list[int], chunk: int = 5000) -> int:
+        """Видалити точки об'єкта за id пакетами (DELETE /api/device/{id}/positions, до 10 000 id за запит).
+
+        Лише для dev: у виправленні порядку (fix.py) цей метод викликається з окремим dev-клієнтом.
+        """
+        deleted = 0
+        for i in range(0, len(ids), chunk):
+            part = [int(x) for x in ids[i:i + chunk]]
+            self.request("DELETE", f"/api/device/{did}/positions", json_data={"ids": part})
+            deleted += len(part)
+        return deleted

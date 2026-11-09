@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from .client import PER_PAGE, M2MClient
 from .errors import FatalTransferError, SendError
 from .models import Point, parse_attributes, parse_ts, position_time, position_to_point
+from .order import DEFAULT_WINDOW_MS, TimeSorter
 from .teltonika import CODEC_8, CODEC_8E, MAX_RECORDS_PER_PACKET, TeltonikaSender
 from .wialon import WialonSender
 
@@ -39,6 +40,8 @@ class TransferConfig:
     wialon_version: str = "2.0"
     limit: int | None = None          # пробний запуск: лише перші N повідомлень
     source_name: str = ""
+    sort_by_time: bool = True         # впорядкувати точки за UTC перед відправкою (див. order.py)
+    sort_window_min: int = DEFAULT_WINDOW_MS // 60_000
 
 
 def make_sender(cfg: TransferConfig):
@@ -79,6 +82,8 @@ class TransferJob:
         self.last_ts_ms: int | None = None
         self.unmapped: set[str] = set()
         self.skipped_ids: set[int] = set()
+        self.reordered = 0                    # скільки точок змінили місце після впорядкування за UTC
+        self.late_points = 0                  # точок, порядок яких не вдалося виправити (відкат більший за вікно)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -125,6 +130,15 @@ class TransferJob:
         self.status = "running"
         self.started_at = time.time()
         self._thread = threading.Thread(target=self._guard, args=(self._run_full,), daemon=True)
+        self._thread.start()
+
+    def start_stream(self, chunks, total: int) -> None:
+        """Відправити готові точки (ітератор списків Point) без читання з API й без впорядкування: як є."""
+        self.total = total
+        self.status = "running"
+        self.started_at = time.time()
+        self.message = "Відправляю повідомлення"
+        self._thread = threading.Thread(target=self._guard, args=(lambda: self._run_stream(chunks),), daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -190,6 +204,7 @@ class TransferJob:
         self._sender.connect()
         self.message = "Переношу повідомлення"
         remaining = cfg.limit
+        sorter = TimeSorter(cfg.sort_window_min * 60_000) if cfg.sort_by_time else None
         for page in c.iter_positions(cfg.device_id, cfg.date_from, cfg.date_to, per_page, first_page=first,
                                      should_stop=self._stop.is_set):
             if self._stop.is_set():
@@ -199,12 +214,26 @@ class TransferJob:
                 items = items[:remaining]
                 remaining -= len(items)
             pts = [pt for pt in (position_to_point(p, self.delta_ms) for p in items) if pt is not None]
+            if sorter:
+                pts = sorter.push(pts)
             self._send_points(pts)
             if remaining is not None and remaining <= 0:
                 break
+        if sorter and not self._stop.is_set():
+            self._send_points(sorter.flush())
+        if sorter:
+            self.reordered, self.late_points = sorter.reordered, sorter.late
         if self.processed < self.total and not self._stop.is_set():
             self.note = (f"Оброблено {self.processed} із {self.total}: решта повідомлень без часу, "
                          "або Prod віддав менше, ніж обіцяв.")
+
+    def _run_stream(self, chunks) -> None:
+        self._sender = make_sender(self.cfg)
+        self._sender.connect()
+        for pts in chunks:
+            if self._stop.is_set():
+                return
+            self._send_points(pts)
 
     def _run_points(self, pts: list[Point]) -> None:
         self._sender = make_sender(self.cfg)
