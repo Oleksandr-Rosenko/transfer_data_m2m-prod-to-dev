@@ -153,6 +153,22 @@ def restore_chunks(path: str, size: int = 2000):
         yield chunk
 
 
+def sorted_chunks(path: str, size: int = 2000):
+    """Точки з резервної копії, впорядковані за UTC-часом (стабільно), шматками по `size`."""
+    pts = [pt for chunk in restore_chunks(path, size) for pt in chunk]
+    pts.sort(key=lambda p: p.ts_ms)
+    for i in range(0, len(pts), size):
+        yield pts[i:i + size]
+
+
+def preview_self(dev: M2MClient, dev_id: int, iv: Interval) -> FixPreview:
+    """Виправлення на місці: скільки повідомлень буде видалено, стільки ж буде відправлено назад."""
+    if not dev.token:
+        raise FixError("Спершу увійдіть у систему")
+    n = count_positions(dev, dev_id, iv)
+    return FixPreview(iv, n, n)
+
+
 def backup_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "m2m_fix_backups")
     os.makedirs(d, exist_ok=True)
@@ -160,9 +176,14 @@ def backup_dir() -> str:
 
 
 class FixJob:
-    """Фонове виправлення: перевірки → резервна копія → видалення → відправка → перевірка → (за потреби) відкат."""
+    """Фонове виправлення: перевірки → резервна копія → видалення → відправка → перевірка → (за потреби) відкат.
 
-    def __init__(self, prod: M2MClient, prod_id: int, dev: M2MClient, dev_id: int, iv: Interval, send_cfg: dict,
+    Джерело правильних точок: Prod (`prod` задано) або сам цей об'єкт (`prod=None`): тоді точки беруться з резервної
+    копії інтервалу й відправляються назад у порядку UTC-часу.
+    """
+
+    def __init__(self, prod: M2MClient | None, prod_id: int | None, dev: M2MClient, dev_id: int, iv: Interval,
+                 send_cfg: dict,
                  expected_dev_count: int | None = None, source_name: str = "", strict_mileage: bool = False,
                  backup_path: str | None = None, verify_timeout: float = 60.0, verify_poll: float = 2.0):
         self.prod, self.prod_id, self.dev, self.dev_id, self.iv = prod, prod_id, dev, dev_id, iv
@@ -183,6 +204,7 @@ class FixJob:
         self.send_job: TransferJob | None = None
         self.restore_job: TransferJob | None = None
         self.verify_info: dict = {}
+        self.unmapped: list[str] = []
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self._stop = threading.Event()
@@ -214,8 +236,8 @@ class FixJob:
         self.log.append(f"{datetime.now().strftime('%H:%M:%S')}  {text}")
 
     def _cfg(self, restore: bool = False) -> TransferConfig:
-        if restore:
-            return TransferConfig(client=self.prod, device_id=0, date_from="", date_to="", shift=False,
+        if restore or self.prod is None:
+            return TransferConfig(client=self.prod or self.dev, device_id=0, date_from="", date_to="", shift=False,
                                   sort_by_time=False, **self.send_cfg)
         return TransferConfig(client=self.prod, device_id=self.prod_id, date_from=self.iv.iso_from,
                               date_to=self.iv.iso_to, shift=False, sort_by_time=True,
@@ -245,7 +267,10 @@ class FixJob:
     def _preflight(self) -> None:
         """Усе, що можна перевірити, не змінюючи dev."""
         self._say("check", "Перевіряю цілі")
-        check_targets(self.prod, self.dev)
+        if self.prod is not None:
+            check_targets(self.prod, self.dev)
+        elif not self.dev.token:
+            raise FixError("Спершу увійдіть у систему")
         imei = str(self.send_cfg.get("imei") or "")
         if not imei:
             raise FixError("Не вказано IMEI/ID об'єкта на dev")
@@ -255,14 +280,19 @@ class FixJob:
                            "видалення й вставка зачепили б різні об'єкти")
         self._say("check", "Перевіряю з'єднання з dev-сервером")
         replay.check_connection(self._cfg())
-        self.prod_count = count_positions(self.prod, self.prod_id, self.iv)
-        if self.prod_count == 0:
-            raise FixError("На Prod за цей інтервал немає повідомлень: видаляти нічого")
+        if self.prod is not None:
+            self.prod_count = count_positions(self.prod, self.prod_id, self.iv)
+            if self.prod_count == 0:
+                raise FixError("На Prod за цей інтервал немає повідомлень: видаляти нічого")
         self._say("backup", "Роблю резервну копію повідомлень dev за інтервалом")
         self.backup_ids = snapshot(self.dev, self.dev_id, self.iv, self.backup_path)
         if self.expected_dev_count is not None and len(self.backup_ids) != self.expected_dev_count:
             raise FixError(f"Кількість повідомлень на dev змінилась ({self.expected_dev_count} → "
                            f"{len(self.backup_ids)}) після перегляду. Оновіть перегляд")
+        if self.prod is None:
+            self.prod_count = len(self.backup_ids)
+            if self.prod_count == 0:
+                raise FixError("У цьому інтервалі немає повідомлень: видаляти нічого")
         self._say("backup", f"Резервна копія: {len(self.backup_ids)} повідомлень → {self.backup_path}")
 
     def _wait_count(self, expected: int) -> int:
@@ -287,13 +317,18 @@ class FixJob:
             job._thread.join(10)
 
     def _send(self) -> None:
-        self._say("send", f"Відправляю {self.prod_count} повідомлень з Prod у правильному порядку")
         job = TransferJob(self._cfg())
         self.send_job = job
-        job.start()
+        if self.prod is None:
+            self._say("send", f"Відправляю {self.prod_count} повідомлень у порядку UTC-часу")
+            job.start_stream(sorted_chunks(self.backup_path), self.prod_count)
+        else:
+            self._say("send", f"Відправляю {self.prod_count} повідомлень з Prod у правильному порядку")
+            job.start()
         self._wait_job(job)
         if self._stop.is_set():
             raise FixError("Зупинено користувачем")
+        self.unmapped = sorted(job.unmapped)
         if job.status != "done" or job.failed or job.ok != self.prod_count:
             raise FixError(f"Відправка не завершена: прийнято {job.ok} із {self.prod_count}, помилок {job.failed}. "
                            f"{job.message}".strip())

@@ -34,7 +34,8 @@ S.setdefault("job", None)
 S.setdefault("preview", None)
 S.setdefault("search_cache", {})
 S.setdefault("order_report", None)
-S.setdefault("dev_client", None)
+S.setdefault("fix_client", None)
+S.setdefault("fix_report", None)
 S.setdefault("fix_preview", None)
 S.setdefault("fix_job", None)
 
@@ -94,7 +95,7 @@ def sidebar_login() -> None:
         if client and client.token:
             st.success(f"Підключено до {host_label(client.base_url)}\n\n{client.email}")
             if st.button("Вийти", disabled=bool(S.job and S.job.running)):
-                S.client, S.preview, S.search_cache, S.fix_preview = None, None, {}, None
+                S.client, S.preview, S.search_cache = None, None, {}
                 st.rerun()
         else:
             with st.form("login_form", border=False):
@@ -115,37 +116,6 @@ def sidebar_login() -> None:
                     else:
                         cl.read_only = True     # Prod лише читаємо: будь-який не-GET запит блокується
                         S.client = cl
-                        st.rerun()
-        st.divider()
-        st.markdown("### Підключення до Dev")
-        st.caption("Потрібне лише для виправлення порядку на dev (вкладка «Діагностика»).")
-        dev: M2MClient | None = S.dev_client
-        fixing = bool(S.fix_job and S.fix_job.running)
-        if dev and dev.token:
-            st.success(f"Підключено до {host_label(dev.base_url)}\n\n{dev.email}")
-            if st.button("Вийти з dev", disabled=fixing):
-                S.dev_client, S.fix_preview = None, None
-                st.rerun()
-        else:
-            with st.form("dev_login_form", border=False):
-                durl = st.text_input("Домен dev", value=secret("DEV_URL"))
-                demail = st.text_input("Логін dev")
-                dpass = st.text_input("Пароль dev", type="password")
-                dsub = st.form_submit_button("Увійти в dev")
-            if dsub:
-                if not (durl.strip() and demail.strip() and dpass):
-                    st.error("Заповніть домен, логін і пароль dev")
-                else:
-                    dc = M2MClient(durl if "//" in durl else f"https://{durl.strip()}")
-                    try:
-                        if S.client and fixmod.host_of(dc.base_url) == fixmod.host_of(S.client.base_url):
-                            raise ApiError("Домен dev збігається з доменом Prod")
-                        with st.spinner("Входжу в dev..."):
-                            dc.login(demail.strip(), dpass)
-                    except ApiError as e:
-                        st.error(str(e))
-                    else:
-                        S.dev_client = dc
                         st.rerun()
         st.caption("Логін і пароль живуть лише в поточній сесії та ніде не зберігаються.")
 
@@ -435,11 +405,13 @@ def order_page() -> None:
             bar.empty()
             S.order_report = {"rep": rep, "name": names.get(device_id, str(device_id)), "from": date_from, "to": date_to,
                               "device_id": device_id}
-            S.fix_preview = None
 
     res = S.get("order_report")
-    if not res:
-        return
+    if res:
+        render_report(res, "ord")
+
+
+def render_report(res: dict, key: str, hint: bool = True) -> None:
     rep = res["rep"]
     st.subheader(f"Результат: {res['name']}")
     st.caption(f"{res['from'][:16].replace('T', ' ')} → {res['to'][:16].replace('T', ' ')}")
@@ -471,7 +443,8 @@ def order_page() -> None:
             "Стрибків координат": s.jumps,
             "Імовірна причина": segment_reason(s),
         } for s in rep.segments]), hide_index=True)
-        st.markdown(
+        if hint:
+            st.markdown(
             "**Що робити.** Для переносу на dev залиште ввімкненою галочку «Впорядкувати точки за UTC-часом» у "
             "вкладці «Перенос»: dev отримає точки в хронологічному порядку. Для платформи це означає, що "
             "ендпойнт точок/треку/експорту треба сортувати за UTC-часом фіксації, а не за локальним. CSV нижче "
@@ -479,8 +452,7 @@ def order_page() -> None:
         )
         rows = export_rows(rep, LOCAL_TZ)
         st.download_button("Завантажити CSV проблемних відрізків (±2 год)", rows_to_csv(rows),
-                           file_name=f"order_{res['name']}.csv", mime="text/csv")
-        fix_section(res)
+                           file_name=f"order_{res['name']}.csv", mime="text/csv", key=f"{key}_csv")
     if rep.jumps_other:
         with st.expander(f"Інші стрибки координат, не пов'язані з порядком часу: {fmt_n(rep.jumps_other)}"):
             st.caption("Нереальна швидкість між сусідніми точками (шум GPS, втрата фіксу). Перші 30.")
@@ -508,6 +480,9 @@ def _fix_progress(job: fixmod.FixJob) -> None:
         elif job.status == "done":
             st.success(job.message)
             info = job.verify_info
+            if job.unmapped:
+                st.warning("Не передано (немає відповідності в `m2m_replay/mapping.py`): " + ", ".join(job.unmapped)
+                           + ". Ці параметри в записаних заново повідомленнях відсутні; вони є в резервній копії.")
             st.caption(f"Перевірено: {fmt_n(info.get('count', 0))} повідомлень на dev, фрагментів із порушеним порядком: "
                        f"{info.get('segments', 0)}.")
             if info.get("mileage_mismatch"):
@@ -532,7 +507,7 @@ def _fix_progress(job: fixmod.FixJob) -> None:
         if not job.running:
             if st.button("Закрити", key="fx_close"):
                 S.fix_job, S.fix_preview = None, None
-                S.order_report = None        # дані на dev змінились: перевірку треба зробити заново
+                S.fix_report = None          # дані змінились: перевірку треба зробити заново
                 st.rerun()
         if run_every and not job.running:
             st.rerun()
@@ -540,108 +515,180 @@ def _fix_progress(job: fixmod.FixJob) -> None:
     live()
 
 
-def fix_section(res: dict) -> None:
-    prod: M2MClient = S.client
-    dev: M2MClient | None = S.dev_client
-    rep = res["rep"]
-    st.divider()
-    st.subheader("Виправлення порядку на dev")
-    job: fixmod.FixJob | None = S.fix_job
-    if job is not None:
-        _fix_progress(job)
-        return
+def fix_page() -> None:
+    st.title("Виправлення порядку точок")
     st.caption(
-        "Скрипт завантажить точки проблемного інтервалу з Dev, збереже резервну копію, видалить ЛИШЕ їх (цей об'єкт, "
-        "цей інтервал) і надішле ті самі повідомлення з Prod у правильному порядку. Якщо щось піде не так, "
-        "інтервал автоматично повернеться як був. Prod не змінюється, на бекенд ніщо не впливає."
+        "Окремий інструмент для одного середовища: входите в потрібну систему, обираєте об'єкт і період. Застосунок "
+        "завантажує точки, знаходить інтервали з порушеним порядком (час іде назад) і за кнопкою видаляє ЛИШЕ їх "
+        "(цього об'єкта, цього інтервалу), після чого відправляє ті самі повідомлення назад у порядку UTC-часу. "
+        "Перед змінами робиться резервна копія, після змін результат перевіряється, а за будь-якої помилки "
+        "інтервал автоматично повертається як був."
     )
-    if not (dev and dev.token):
-        st.info("Увійдіть у dev у бічній панелі ліворуч.")
+    job: fixmod.FixJob | None = S.fix_job
+    running = bool(job and job.running)
+
+    # 1. Середовище
+    with st.container(border=True):
+        st.subheader("1. Середовище")
+        cl: M2MClient | None = S.fix_client
+        if cl and cl.token:
+            c1, c2 = st.columns([4, 1])
+            c1.success(f"Підключено до {host_label(cl.base_url)} · {cl.email}")
+            if c2.button("Вийти", key="fx_logout", disabled=running):
+                S.fix_client, S.fix_report, S.fix_preview = None, None, None
+                st.rerun()
+        else:
+            with st.form("fx_login_form", border=False):
+                url = st.text_input("Домен", value=secret("FIX_URL", secret("DEV_URL")), key="fx_url")
+                email = st.text_input("Логін", key="fx_email")
+                password = st.text_input("Пароль", type="password", key="fx_pass")
+                submitted = st.form_submit_button("Увійти")
+            if submitted:
+                if not (url.strip() and email.strip() and password):
+                    st.error("Заповніть домен, логін і пароль")
+                else:
+                    nc = M2MClient(url if "//" in url else f"https://{url.strip()}")
+                    try:
+                        with st.spinner("Входжу..."):
+                            nc.login(email.strip(), password)
+                    except ApiError as e:
+                        st.error(str(e))
+                    else:
+                        S.fix_client = nc
+                        st.rerun()
+            st.caption("Логін і пароль живуть лише в поточній сесії та ніде не зберігаються.")
+    cl = S.fix_client
+    if not (cl and cl.token):
         return
 
+    # 2. Прогрес або результат попереднього виправлення
+    if job is not None:
+        st.subheader("Виправлення")
+        _fix_progress(job)
+        return
+
+    # 2. Об'єкт і період
     with st.container(border=True):
-        st.markdown("**Куди надсилати (dev-сервер приймання)**")
-        c0, c1, c2, c3 = st.columns([2, 3, 1, 3])
+        st.subheader("2. Об'єкт і період")
+        q = st.text_input("Пошук об'єкта", placeholder="Назва або IMEI", key="fx_q")
+        devices: list[dict] = []
+        try:
+            devices = search_devices(cl, q)
+        except ApiError as e:
+            st.error(f"Не вдалося отримати список об'єктів: {e}")
+        names = {d["id"]: d["name"] for d in devices}
+        device_id = st.selectbox("Об'єкт", options=list(names), format_func=lambda i: f"{names[i]} (ID {i})",
+                                 disabled=not names, key="fx_device")
+        today = datetime.now(LOCAL_TZ).date()
+        a, b = st.columns(2)
+        d_from = a.date_input("Від", value=today - timedelta(days=30), key="fx_d_from")
+        t_from = a.time_input("Година", value=dtime(0, 0), key="fx_t_from", step=60)
+        d_to = b.date_input("До", value=today, key="fx_d_to")
+        t_to = b.time_input("Година ", value=dtime(23, 59), key="fx_t_to", step=60)
+        period_ok = datetime.combine(d_from, t_from) < datetime.combine(d_to, t_to)
+        if not period_ok:
+            st.error("Початок періоду має бути раніше за кінець.")
+        st.caption("Період — за київським часом. Перевірка лише читає дані.")
+
+    if st.button("Перевірити порядок", type="primary", disabled=not (device_id and period_ok), key="fx_scan"):
+        bar = st.progress(0.0, text="Читаю точки...")
+        date_from, date_to = to_iso(d_from, t_from), to_iso(d_to, t_to, end=True)
+        try:
+            unique = str(cl.get_device(device_id).get("uniqueId") or "")
+            first = cl.positions_page(device_id, date_from, date_to, 1)
+            total = int(first.get("total") or len(first.get("items") or [])) or 1
+
+            def on_progress(done: int) -> None:
+                bar.progress(min(1.0, done / total), text=f"Прочитано {fmt_n(done)} із {fmt_n(total)}")
+
+            rep = scan_pages(cl.iter_positions(device_id, date_from, date_to, first_page=first),
+                             tz=LOCAL_TZ, on_progress=on_progress)
+        except ApiError as e:
+            bar.empty()
+            st.error(f"Не вдалося отримати точки: {e}")
+        else:
+            bar.empty()
+            S.fix_report = {"rep": rep, "name": names.get(device_id, str(device_id)), "from": date_from,
+                            "to": date_to, "device_id": device_id, "unique": unique}
+            S.fix_preview = None
+
+    res = S.get("fix_report")
+    if not res:
+        return
+    render_report(res, "fx", hint=False)
+    rep = res["rep"]
+    if not rep.segments:
+        return
+
+    # 3. Виправлення
+    st.divider()
+    st.subheader("3. Виправлення")
+    imei = res["unique"]
+    if not imei:
+        st.error("У об'єкта немає uniqueId (IMEI/ID): відправка назад неможлива.")
+        return
+    with st.container(border=True):
+        st.markdown("**Куди відправляти виправлені точки (сервер приймання цього середовища)**")
+        c0, c1, c2 = st.columns([2, 3, 1])
         proto = c0.selectbox("Протокол", list(PROTOCOLS), format_func=PROTOCOLS.get, key="fx_proto")
         host = c1.text_input("Домен або IP", value=secret("DEV_HOST"), key="fx_host").strip()
         port_s = c2.text_input("Порт", value=secret("PORT_WIALON" if proto == "wialon" else "PORT_TELTONIKA",
                                                      DEFAULT_PORTS[proto]), key=f"fx_port_{proto}")
-        imei = c3.text_input("ID/IMEI об'єкта", key="fx_imei").strip()
         port_ok = port_s.strip().isdigit() and 0 < int(port_s) < 65536
-
-        st.markdown("**Об'єкт на dev, який буде змінено**")
-        fq = st.text_input("Пошук на dev", value=imei, placeholder="Назва або IMEI", key="fx_q")
-        dev_devices: list[dict] = []
-        try:
-            dev_devices = search_devices(dev, fq) if fq.strip() else []
-        except ApiError as e:
-            st.error(f"Не вдалося отримати список об'єктів dev: {e}")
-        dnames = {d["id"]: d["name"] for d in dev_devices}
-        dev_id = st.selectbox("Об'єкт на dev", list(dnames), format_func=lambda i: f"{dnames[i]} (ID {i})",
-                              disabled=not dnames, key="fx_dev_id")
-        ident_ok = False
-        if dev_id and imei:
-            try:
-                uid = str(dev.get_device(dev_id).get("uniqueId") or "")
-            except ApiError as e:
-                uid = ""
-                st.error(f"Не вдалося прочитати об'єкт dev: {e}")
-            ident_ok = uid == imei
-            if ident_ok:
-                st.success(f"✓ uniqueId об'єкта на dev збігається з {imei}")
-            else:
-                st.error(f"✗ uniqueId об'єкта на dev: «{uid}», а в полі вище: «{imei}». Виправлення заблоковано.")
-
+        st.caption(f"IMEI/ID об'єкта береться з самого об'єкта: `{imei}` — інший об'єкт змінити неможливо.")
         mode = st.radio("Що перезаписати", list(fixmod.MODES), format_func=fixmod.MODES.get, key="fx_mode")
         strict = st.checkbox("Вважати помилкою, якщо пробіг після виправлення не збігається з довжиною треку "
                              "(тоді інтервал повернеться як був)", key="fx_strict")
 
-    ready = bool(prod and dev and dev_id and imei and host and port_ok and ident_ok)
+    ready = bool(host and port_ok)
+    sig = (res["device_id"], res["from"], res["to"], proto, host, port_s, mode, strict)
     if st.button("Підготувати (нічого не змінює)", disabled=not ready, key="fx_prepare"):
         try:
             end_ms = int(datetime.fromisoformat(res["to"]).timestamp() * 1000)
             iv = fixmod.plan_interval(rep, mode, period_end_ms=end_ms)
-            with st.spinner("Рахую повідомлення на Prod і dev..."):
-                pv = fixmod.preview(prod, res["device_id"], dev, dev_id, iv)
+            with st.spinner("Рахую повідомлення в інтервалі..."):
+                pv = fixmod.preview_self(cl, res["device_id"], iv)
         except (fixmod.FixError, ApiError) as e:
             st.error(str(e))
         else:
-            S.fix_preview = {"pv": pv, "key": (dev_id, imei, proto, host, port_s, mode, strict)}
+            S.fix_preview = {"pv": pv, "sig": sig}
 
     fp = S.fix_preview
     if not fp:
         return
-    if fp["key"] != (dev_id, imei, proto, host, port_s, mode, strict):
+    if fp["sig"] != sig:
         st.info("Параметри змінились: натисніть «Підготувати» ще раз.")
         return
     pv: fixmod.FixPreview = fp["pv"]
+    domain = host_label(cl.base_url)
     with st.container(border=True):
         st.markdown(
+            f"**Об'єкт:** {res['name']} (ID {res['device_id']}, `{imei}`) на **{domain}**  \n"
             f"**Інтервал (Київ):** {fmt_ms(pv.interval.from_ms)} → {fmt_ms(pv.interval.to_ms)}  \n"
-            f"**Буде видалено на dev:** {fmt_n(pv.dev_count)} повідомлень об'єкта `{imei}` (dev ID {dev_id})  \n"
-            f"**Буде надіслано з Prod:** {fmt_n(pv.prod_count)} повідомлень об'єкта {res['name']} (ID {res['device_id']}), "
-            "у хронологічному порядку  \n"
+            f"**Буде видалено й записано заново:** {fmt_n(pv.dev_count)} повідомлень  \n"
             "Інші об'єкти та повідомлення поза цим інтервалом не чіпаються."
         )
-        if pv.prod_count == 0:
-            st.error("На Prod у цьому інтервалі немає повідомлень, виправляти нічого.")
-        elif pv.dev_count != pv.prod_count:
-            st.warning(f"На dev {fmt_n(pv.dev_count)} повідомлень, на Prod {fmt_n(pv.prod_count)}. Після виправлення "
-                       "на dev має стати стільки ж, скільки на Prod; різниця означає, що dev містив зайві або неповні дані.")
-        ok = st.checkbox(f"Підтверджую: видалити {fmt_n(pv.dev_count)} повідомлень на dev в об'єкті {imei} "
-                         f"за вказаний інтервал і записати {fmt_n(pv.prod_count)} з Prod", key="fx_confirm")
-        if st.button("Виправити порядок", type="primary", disabled=not (ok and pv.prod_count > 0), key="fx_run"):
+        if pv.dev_count == 0:
+            st.error("В інтервалі немає повідомлень, виправляти нічого.")
+        st.warning(
+            "Видалення незворотне засобами платформи; повернення відбувається лише з резервної копії, яку робить "
+            "застосунок. Відновлені повідомлення матимуть нові внутрішні id, а похідні поля (пробіг) платформа "
+            "порахує наново. Параметри, для яких немає відповідності в `m2m_replay/mapping.py`, у відправку не "
+            "потрапляють, їхній список буде показано після завершення. Перша спроба має бути на dev."
+        )
+        typed = st.text_input(f"Для підтвердження введіть домен середовища: {domain}", key="fx_typed")
+        ok = typed.strip().lower() == domain.lower()
+        if st.button("Виправити порядок", type="primary", disabled=not (ok and pv.dev_count > 0), key="fx_run"):
             send_cfg = dict(protocol=proto, host=host, port=int(port_s), imei=imei)
-            job = fixmod.FixJob(prod, res["device_id"], dev, dev_id, pv.interval, send_cfg,
-                                expected_dev_count=pv.dev_count, source_name=res["name"], strict_mileage=strict)
-            S.fix_job = job
-            job.start()
+            new_job = fixmod.FixJob(None, None, cl, res["device_id"], pv.interval, send_cfg,
+                                    expected_dev_count=pv.dev_count, source_name=res["name"], strict_mileage=strict)
+            S.fix_job = new_job
+            new_job.start()
             st.rerun()
-
 
 # ---------------------------------------------------------------- запуск
 sidebar_login()
-tab_transfer, tab_order = st.tabs(["Перенос Prod → Dev", "Діагностика порядку точок"])
+tab_transfer, tab_order, tab_fix = st.tabs(["Перенос Prod → Dev", "Діагностика порядку точок", "Виправлення порядку"])
 with tab_transfer:
     if S.stage == "progress" and S.job is not None:
         progress_page()
@@ -649,3 +696,5 @@ with tab_transfer:
         setup_page()
 with tab_order:
     order_page()
+with tab_fix:
+    fix_page()

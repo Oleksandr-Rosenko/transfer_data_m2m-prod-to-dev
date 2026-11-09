@@ -364,5 +364,62 @@ class FixPreflightTests(unittest.TestCase):
         self.assert_untouched(job, dev, snap)
 
 
+class LocalSortDev(FakeDev):
+    """dev, який при читанні сортує за локальним часом без зсуву (як у проблемі): порядок вставки нічого не змінює."""
+
+    def inside(self, did, a, b):
+        tz = get_local_tz()
+        return sorted(super().inside(did, a, b),
+                      key=lambda p: parse_ts(p["deviceTime"]).astimezone(tz).replace(tzinfo=None))
+
+
+class SelfFixTests(unittest.TestCase):
+    """Виправлення на місці: джерело правильних точок — резервна копія самого об'єкта, Prod не потрібен."""
+
+    def run_self(self, dev, iv, modes=("ok",), **kw):
+        tmp = tempfile.mkdtemp()
+        job = FixJob(None, None, dev, DEV_ID, iv, send_cfg(), backup_path=os.path.join(tmp, "b.json.gz"),
+                     verify_timeout=0.2, verify_poll=0.02, **kw)
+        with mock.patch.object(replay, "make_sender", sender_factory(dev, DEV_ID, *modes)):
+            job.start()
+            t0 = time.time()
+            while job.running and time.time() - t0 < 60:
+                time.sleep(0.02)
+            job._thread.join(5)
+        return job
+
+    def test_resorts_points_of_the_same_object(self):
+        _, dev, iv = build_world()
+        before = times(dev, DEV_ID, iv)
+        other_before = list(dev.store[OTHER_ID])
+        self.assertNotEqual(before, sorted(before))
+        job = self.run_self(dev, iv)
+        self.assertEqual(job.status, "done", job.message)
+        t = times(dev, DEV_ID, iv)
+        self.assertEqual(t, sorted(t))
+        self.assertEqual(len(t), len(before))
+        self.assertEqual({d for d, _ in dev.delete_calls}, {DEV_ID})
+        self.assertEqual(dev.store[OTHER_ID], other_before)
+        self.assertEqual([p["id"] for p in dev.store[DEV_ID] if p["id"] in (9001, 9002)], [9001, 9002])
+
+    def test_rolls_back_when_read_order_ignores_insert_order(self):
+        """Платформа сортує при читанні за локальним часом: перевставка не допомагає, перевірка має відкотити."""
+        _, dev, iv = build_world()
+        slow = LocalSortDev(dev.store, dev.unique)
+        original_ids = {p["id"] for p in slow.inside(DEV_ID, iv.iso_from, iv.iso_to)}
+        before = times(slow, DEV_ID, iv)
+        job = self.run_self(slow, iv)
+        self.assertEqual(job.status, "rolled_back", job.message)
+        self.assertIn("порядок", job.message.lower())
+        self.assertEqual(times(slow, DEV_ID, iv), before)
+        self.assertEqual(len(original_ids), len(before))
+
+    def test_unmapped_params_are_reported(self):
+        _, dev, iv = build_world()
+        job = self.run_self(dev, iv)
+        self.assertEqual(job.status, "done", job.message)
+        self.assertIsInstance(job.unmapped, list)
+
+
 if __name__ == "__main__":
     unittest.main()
