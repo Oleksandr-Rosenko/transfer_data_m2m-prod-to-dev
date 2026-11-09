@@ -120,12 +120,22 @@ class OrderReport:
     out_of_order: int = 0
     jumps_other: int = 0                         # стрибки координат, не пов'язані з порядком часу
     jump_samples: list[tuple[int, float]] = field(default_factory=list)   # (ts_ms, км), перші 30
+    jumps_in_fold: int = 0                       # з них у годині, що повторюється (ознака «віяла» при впорядкованому часі)
+    jump_raw: list[dict] = field(default_factory=list)   # сирі поля часу двох сусідніх точок біля перших стрибків
     segments: list[OrderSegment] = field(default_factory=list)
     # (№ у відповіді API, ts_ms, lat, lon, швидкість, id точки, totalDistance у метрах) — для експорту та перевірок
     points: list[tuple] = field(default_factory=list)
     attr_km: float | None = None                 # пробіг за атрибутом totalDistance (за хронологією, без скидань лічильника)
     path_km: float | None = None                 # довжина треку за координатами (за хронологією)
     td_decreases: int = 0                        # скільки разів totalDistance зменшується за хронологією
+
+
+def _raw_times(p: dict) -> dict:
+    """Як API віддав час точки (рядки як є) і незалежні від нього часові параметри трекера."""
+    a = parse_attributes(p.get("attributes"))
+    return {"id": p.get("id"), "serverTime": p.get("serverTime"), "deviceTime": p.get("deviceTime"),
+            "fixTime": p.get("fixTime"), "sns16486": a.get("sns16486"),
+            "lat": p.get("latitude"), "lon": p.get("longitude")}
 
 
 def _f(x) -> float | None:
@@ -143,6 +153,7 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
     rep = OrderReport()
     prev_ts: int | None = None
     prev_ll: tuple[float, float] | None = None
+    prev_item: dict | None = None
     idx = 0
     for page in pages:
         for p in page.get("items") or []:
@@ -174,6 +185,11 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
                 rep.jumps_other += 1
                 if len(rep.jump_samples) < 30:
                     rep.jump_samples.append((ts, jump_km))
+                if is_ambiguous(ts, tz) or (prev_ts is not None and is_ambiguous(prev_ts, tz)):
+                    rep.jumps_in_fold += 1
+                if len(rep.jump_raw) < 12 and prev_item is not None:
+                    rep.jump_raw += [_raw_times(prev_item), _raw_times(p)]
+            prev_item = p
             prev_ts = ts
             if has_ll:
                 prev_ll = (lat, lon)

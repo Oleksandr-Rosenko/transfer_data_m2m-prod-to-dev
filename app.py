@@ -431,8 +431,10 @@ def render_report(res: dict, key: str, hint: bool = True) -> None:
         if mileage_mismatch(rep):
             st.warning("Пробіг платформи не збігається з довжиною треку: імовірно, його було пораховано "
                        "за «зигзагом». Після виправлення порядку перевірте його окремо.")
-    if not rep.segments:
+    if not rep.segments and rep.jumps_in_fold < 3:
         st.success("Порядок правильний: усі точки йдуть за зростанням UTC-часу.")
+    elif not rep.segments:
+        pass        # «віяло» при впорядкованому часі: пояснення нижче
     else:
         st.error(f"Порядок порушено, фрагментів: {len(rep.segments)}. Трек на мапі буде «зигзагом» між двома місцями.")
         st.dataframe(pd.DataFrame([{
@@ -453,6 +455,16 @@ def render_report(res: dict, key: str, hint: bool = True) -> None:
         rows = export_rows(rep, LOCAL_TZ)
         st.download_button("Завантажити CSV проблемних відрізків (±2 год)", rows_to_csv(rows),
                            file_name=f"order_{res['name']}.csv", mime="text/csv", key=f"{key}_csv")
+    if not rep.segments and rep.jumps_in_fold >= 3:
+        st.error(
+            f"Час у відповіді API виглядає впорядкованим, але в годині, що повторюється (перехід на зимовий час), є "
+            f"{fmt_n(rep.jumps_in_fold)} стрибків координат між сусідніми точками. Схоже на «віяло»: платформа віддає "
+            "точки впорядкованими за своїм часом, але цей час не збігається з реальним UTC. Нижче — сирі поля часу "
+            "біля стрибків: за ними видно, яке поле зберігає реальний порядок."
+        )
+    if rep.jump_raw:
+        with st.expander("Сирі поля часу біля перших стрибків (як їх віддає API)", expanded=not rep.segments and rep.jumps_in_fold >= 3):
+            st.dataframe(pd.DataFrame(rep.jump_raw), hide_index=True)
     if rep.jumps_other:
         with st.expander(f"Інші стрибки координат, не пов'язані з порядком часу: {fmt_n(rep.jumps_other)}"):
             st.caption("Нереальна швидкість між сусідніми точками (шум GPS, втрата фіксу). Перші 30.")
