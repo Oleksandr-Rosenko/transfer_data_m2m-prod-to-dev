@@ -33,7 +33,6 @@ S.setdefault("stage", "setup")      # setup | progress
 S.setdefault("job", None)
 S.setdefault("preview", None)
 S.setdefault("search_cache", {})
-S.setdefault("order_report", None)
 S.setdefault("fix_client", None)
 S.setdefault("fix_report", None)
 S.setdefault("fix_preview", None)
@@ -219,7 +218,7 @@ def setup_page() -> None:
             "Впорядкувати точки за UTC-часом перед відправкою", value=True, key="sort_time",
             help="Якщо Prod віддає точки не за хронологією (наприклад, у ніч переходу на зимовий час, коли година "
                  "03:00–03:59 повторюється), dev отримає їх у правильному порядку й порахує пробіг без «стрибків». "
-                 "Перевірити період можна у вкладці «Діагностика порядку точок».",
+                 "Перевірити період можна у вкладці «Виправлення порядку точок».",
         )
         o1, o2 = st.columns(2)
         batch = o1.number_input("Записів у пакеті", 1, 255, 100, key="batch")
@@ -312,7 +311,7 @@ def progress_page() -> None:
                             "(Prod віддав їх не за хронологією).")
                 if job.late_points:
                     st.warning(f"{fmt_n(job.late_points)} точок мають відкат часу більший за вікно впорядкування "
-                               "й відправлені як є. Перевірте період у вкладці «Діагностика порядку точок».")
+                               "й відправлені як є. Перевірте період у вкладці «Виправлення порядку точок».")
                 if job.first_ts_ms:
                     st.markdown(f"**Шукайте на dev** в об'єкті `{cfg.imei}` за період  \n"
                                 f"{fmt_ms(job.first_ts_ms)} → {fmt_ms(job.last_ts_ms)}")
@@ -350,67 +349,7 @@ def progress_page() -> None:
     live()
 
 
-# ---------------------------------------------------------------- вкладка: діагностика порядку точок
-def order_page() -> None:
-    client: M2MClient | None = S.client
-    connected = bool(client and client.token)
-    st.title("Діагностика порядку точок")
-    st.caption(
-        "Перевіряє, чи віддає Prod точки об'єкта за хронологією (UTC). Типовий випадок: у ніч переходу на зимовий час "
-        "година 03:00–03:59 повторюється, точки двох годин перемішуються, і трек стрибає на десятки кілометрів."
-    )
-    if not connected:
-        st.info("Увійдіть у Prod у бічній панелі ліворуч.")
-
-    with st.container(border=True):
-        q = st.text_input("Пошук об'єкта", placeholder="Назва або IMEI", key="ord_q", disabled=not connected)
-        devices: list[dict] = []
-        if connected:
-            try:
-                devices = search_devices(client, q)
-            except ApiError as e:
-                st.error(f"Не вдалося отримати список об'єктів: {e}")
-        names = {d["id"]: d["name"] for d in devices}
-        device_id = st.selectbox(
-            "Об'єкт", options=list(names), format_func=lambda i: f"{names[i]} (ID {i})",
-            disabled=not devices, key="ord_device",
-        )
-        today = datetime.now(LOCAL_TZ).date()
-        a, b = st.columns(2)
-        d_from = a.date_input("Від", value=today - timedelta(days=30), key="ord_d_from")
-        t_from = a.time_input("Година", value=dtime(0, 0), key="ord_t_from", step=60)
-        d_to = b.date_input("До", value=today, key="ord_d_to")
-        t_to = b.time_input("Година ", value=dtime(23, 59), key="ord_t_to", step=60)
-        period_ok = datetime.combine(d_from, t_from) < datetime.combine(d_to, t_to)
-        if not period_ok:
-            st.error("Початок періоду має бути раніше за кінець.")
-        st.caption("Лише читання: нічого не змінюється ні на Prod, ні на dev. Період — за київським часом.")
-
-    if st.button("Перевірити порядок", type="primary", disabled=not (connected and device_id and period_ok)):
-        bar = st.progress(0.0, text="Читаю точки з Prod...")
-        date_from, date_to = to_iso(d_from, t_from), to_iso(d_to, t_to, end=True)
-        try:
-            first = client.positions_page(device_id, date_from, date_to, 1)
-            total = int(first.get("total") or len(first.get("items") or [])) or 1
-
-            def on_progress(done: int) -> None:
-                bar.progress(min(1.0, done / total), text=f"Прочитано {fmt_n(done)} із {fmt_n(total)}")
-
-            rep = scan_pages(client.iter_positions(device_id, date_from, date_to, first_page=first),
-                             tz=LOCAL_TZ, on_progress=on_progress)
-        except ApiError as e:
-            bar.empty()
-            st.error(f"Не вдалося отримати точки: {e}")
-        else:
-            bar.empty()
-            S.order_report = {"rep": rep, "name": names.get(device_id, str(device_id)), "from": date_from, "to": date_to,
-                              "device_id": device_id}
-
-    res = S.get("order_report")
-    if res:
-        render_report(res, "ord")
-
-
+# ---------------------------------------------------------------- вкладка: діагностика й виправлення порядку точок
 def render_report(res: dict, key: str, hint: bool = True) -> None:
     rep = res["rep"]
     st.subheader(f"Результат: {res['name']}")
@@ -707,13 +646,11 @@ def fix_page() -> None:
 
 # ---------------------------------------------------------------- запуск
 sidebar_login()
-tab_transfer, tab_order, tab_fix = st.tabs(["Перенос Prod → Dev", "Діагностика порядку точок", "Виправлення порядку"])
+tab_transfer, tab_fix = st.tabs(["Перенос Prod → Dev", "Виправлення порядку точок"])
 with tab_transfer:
     if S.stage == "progress" and S.job is not None:
         progress_page()
     else:
         setup_page()
-with tab_order:
-    order_page()
 with tab_fix:
     fix_page()
