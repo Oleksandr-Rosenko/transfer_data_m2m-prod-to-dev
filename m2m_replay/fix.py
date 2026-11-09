@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 from . import replay
 from .client import M2MClient
 from .models import position_time, position_to_point
-from .order import DEFAULT_WINDOW_MS, OrderReport, get_local_tz, mileage_mismatch, scan_pages
+from .order import DEFAULT_WINDOW_MS, OrderReport, get_local_tz, mileage_mismatch, scan_pages, true_ts_ms
 from .replay import TransferConfig, TransferJob
 
 MODES = {
@@ -154,8 +154,18 @@ def restore_chunks(path: str, size: int = 2000):
 
 
 def sorted_chunks(path: str, size: int = 2000):
-    """Точки з резервної копії, впорядковані за UTC-часом (стабільно), шматками по `size`."""
-    pts = [pt for chunk in restore_chunks(path, size) for pt in chunk]
+    """Точки з резервної копії з виправленим часом (див. `true_ts_ms`), впорядковані за ним (стабільно), шматками."""
+    tz = get_local_tz()
+    pts = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        next(f)  # метадані
+        for line in f:
+            raw = json.loads(line)
+            pt = position_to_point(raw)
+            ts, _ = true_ts_ms(raw, tz)
+            if pt is not None and ts is not None:
+                pt.ts_ms = ts
+                pts.append(pt)
     pts.sort(key=lambda p: p.ts_ms)
     for i in range(0, len(pts), size):
         yield pts[i:i + size]

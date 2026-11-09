@@ -421,5 +421,84 @@ class SelfFixTests(unittest.TestCase):
         self.assertIsInstance(job.unmapped, list)
 
 
+FOLD_START_UTC = ms_of("2026-10-24T23:56:00Z")
+SECOND_HOUR_UTC = ms_of("2026-10-25T01:00:00Z")
+
+
+def shifted_world(buggy_ingest: bool = False):
+    """Як у реальних даних: друга година 03:xx збережена з міткою на 1 год раніше; годинник трекера (sns16486) каже правду.
+
+    Платформа віддає точки за міткою часу, тож перша й друга години перемішані, а координати стрибають між двома місцями.
+    """
+    import datetime as dt
+    items, n = [], 0
+    for k in range(0, 4 * 60 * 2):                       # 4 год за хвилиною
+        true_ms = ms_of("2026-10-24T23:30:00Z") + k * 30_000
+        second = SECOND_HOUR_UTC <= true_ms < SECOND_HOUR_UTC + 3_600_000
+        stamp = true_ms + 19_000 - (3_600_000 if second else 0)
+        if not (ms_of("2026-10-24T23:30:00Z") <= true_ms < ms_of("2026-10-25T03:30:00Z")):
+            continue
+        n += 1
+        lat = 53.34 + 0.001 * (k % 7) if second else 52.68
+        items.append({"id": 1000 + n, "deviceTime": iso(dt.datetime.fromtimestamp(stamp / 1000, tz=dt.timezone.utc)),
+                      "latitude": lat, "longitude": 20.4, "speed": 0,
+                      "attributes": json.dumps({"sns16486": true_ms // 1000, "pf_orig_lat": lat, "pf_orig_lon": 20.4})})
+    return items
+
+
+class InstantSortDev(FakeDev):
+    """Платформа: читає точки за міткою часу (стабільно), як це видно в API."""
+
+    def inside(self, did, a, b):
+        return sorted(super().inside(did, a, b), key=lambda p: ms_of(p["deviceTime"]))
+
+
+class BuggyIngestDev(InstantSortDev):
+    """Прийом знову «з'їдає» годину в другій годині переходу: нові точки зберігаються з міткою на 1 год раніше."""
+
+    def add_point(self, did, pt) -> None:
+        if SECOND_HOUR_UTC <= pt.ts_ms < SECOND_HOUR_UTC + 3_600_000:    # справжній час другої години «з'їдається»
+            pt.ts_ms -= 3_600_000
+        super().add_point(did, pt)
+
+
+class ShiftedHourTests(unittest.TestCase):
+    def make(self, cls):
+        items = shifted_world()
+        dev = cls({DEV_ID: [dict(p) for p in items]}, {DEV_ID: IMEI})
+        return items, dev
+
+    def test_scan_sees_the_fan_through_tracker_clock(self):
+        items, dev = self.make(InstantSortDev)
+        rep = scan_pages(pages(dev.inside(DEV_ID, "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z")), get_local_tz())
+        self.assertEqual(len(rep.segments), 1)
+        self.assertGreater(rep.time_fixed, 100)
+        self.assertGreater(rep.out_of_order, 10)
+
+    def test_fix_corrects_timestamps_and_track(self):
+        items, dev = self.make(InstantSortDev)
+        rep = scan_pages(pages(dev.inside(DEV_ID, "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z")), get_local_tz())
+        iv = plan_interval(rep, "hull")
+        job = SelfFixTests().run_self(dev, iv)
+        self.assertEqual(job.status, "done", job.message)
+        stored = sorted(dev.store[DEV_ID], key=lambda p: ms_of(p["deviceTime"]))
+        # після виправлення порядок за міткою збігається з порядком за годинником трекера
+        clocks = [json.loads(p["attributes"])["sns16486"] for p in stored]
+        self.assertEqual(clocks, sorted(clocks))
+        self.assertEqual(len(stored), len(items))
+        rep2 = scan_pages(pages(dev.inside(DEV_ID, iv.iso_from, iv.iso_to)), get_local_tz())
+        self.assertEqual((len(rep2.segments), rep2.time_fixed), (0, 0))
+
+    def test_rolls_back_if_ingest_keeps_shifting_time(self):
+        items, dev = self.make(BuggyIngestDev)
+        rep = scan_pages(pages(dev.inside(DEV_ID, "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z")), get_local_tz())
+        iv = plan_interval(rep, "hull")
+        before = sorted((p["deviceTime"], p["attributes"]) for p in dev.store[DEV_ID])
+        job = SelfFixTests().run_self(dev, iv)
+        self.assertEqual(job.status, "rolled_back", job.message)
+        after = sorted((p["deviceTime"], p["attributes"]) for p in dev.store[DEV_ID])
+        self.assertEqual(after, before)
+
+
 if __name__ == "__main__":
     unittest.main()

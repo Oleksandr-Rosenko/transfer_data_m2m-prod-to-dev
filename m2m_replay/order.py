@@ -4,7 +4,9 @@
 віддає точки впорядкованими за локальним часом, точки двох різних годин (різниця рівно 1 година в UTC) перемішуються,
 і трек «зигзагом» стрибає між двома місцями.
 
-Тут два інструменти, обидва працюють з UTC-часом точок (`position_time`), який API віддає однозначно:
+Важливо: у реальних даних платформа зберігає частину точок другої години з міткою на 1 год раніше (збігаються
+`deviceTime`, `fixTime`, `serverTime`), тож мітка не відображає порядок. Справжній момент видно за годинником
+трекера (`sns16486`), див. `true_ts_ms`. Усі інструменти нижче працюють із цим виправленим часом:
 
 * `TimeSorter` — впорядкування потоку точок за UTC із обмеженим буфером (для переносу на dev);
 * `scan_pages` — діагностика: де порядок порушено, чи це схоже на перехід годин, скільки «стрибків» координат.
@@ -87,6 +89,28 @@ class TimeSorter:
 # ---------------------------------------------------------------------------
 # Діагностика
 # ---------------------------------------------------------------------------
+CLOCK_ATTR = "sns16486"             # unix-час за годинником трекера (UTC): незалежне від платформи джерело правди
+CLOCK_TOL_MS = 10 * 60_000          # допуск на розбіжність годинника трекера з серверним часом (типово ~20 с)
+
+
+def true_ts_ms(p: dict, tz: ZoneInfo) -> tuple[int | None, bool]:
+    """UTC-час точки в мс і ознака виправлення.
+
+    У годині переходу на зимовий час платформа зберігає частину точок із часом, зсунутим рівно на 1 годину назад
+    (друге 03:xx трактується як перше): `deviceTime`, `fixTime` і `serverTime` збігаються, але годинник трекера
+    (`sns16486`) показує справжній момент, на годину пізніший. Тоді повертаємо час платформи + 1 год.
+    Без параметра годинника або поза годиною переходу час береться як є.
+    """
+    t = position_time(p)
+    if t is None:
+        return None, False
+    ts = int(round(t.timestamp() * 1000))
+    clock = _f(parse_attributes(p.get("attributes")).get(CLOCK_ATTR))
+    if clock is not None and is_ambiguous(ts, tz) and abs(clock * 1000 - ts - HOUR_MS) <= CLOCK_TOL_MS:
+        return ts + HOUR_MS, True
+    return ts, False
+
+
 def is_ambiguous(ts_ms: int, tz: ZoneInfo) -> bool:
     """Чи припадає момент на годину, що повторюється (локальний час 03:xx в ніч переходу на зимовий)."""
     local = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(tz)
@@ -120,6 +144,7 @@ class OrderReport:
     out_of_order: int = 0
     jumps_other: int = 0                         # стрибки координат, не пов'язані з порядком часу
     jump_samples: list[tuple[int, float]] = field(default_factory=list)   # (ts_ms, км), перші 30
+    time_fixed: int = 0                          # точок, чий час на платформі зсунуто на 1 год (виправлено за годинником трекера)
     jumps_in_fold: int = 0                       # з них у годині, що повторюється (ознака «віяла» при впорядкованому часі)
     jump_raw: list[dict] = field(default_factory=list)   # сирі поля часу двох сусідніх точок біля перших стрибків
     segments: list[OrderSegment] = field(default_factory=list)
@@ -158,11 +183,11 @@ def scan_pages(pages: Iterable[dict], tz: ZoneInfo | None = None,
     for page in pages:
         for p in page.get("items") or []:
             idx += 1
-            t = position_time(p)
-            if t is None:
+            ts, fixed = true_ts_ms(p, tz)
+            if ts is None:
                 rep.no_time += 1
                 continue
-            ts = int(round(t.timestamp() * 1000))
+            rep.time_fixed += fixed
             lat, lon = _f(p.get("latitude")), _f(p.get("longitude"))
             td = _f(parse_attributes(p.get("attributes")).get("totalDistance"))
             rep.points.append((idx, ts, lat, lon, _f(p.get("speed")), p.get("id"), td))
