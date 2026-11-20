@@ -695,7 +695,6 @@ def live_relay_page() -> None:
         with col_btn:
             if not engine.is_running:
                 if st.button("Почати ретрансляцію", type="primary", disabled=not can_start, use_container_width=True, key="live_btn_start"):
-                    engine.sync_devices(client)
                     src_name = names.get(device_id, f"ID {device_id}")
                     clean_host = dev_host.strip()
                     if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
@@ -704,11 +703,9 @@ def live_relay_page() -> None:
                         dev_url = f"{clean_host}:{dev_port.strip()}"
 
                     engine.start(
-                        base_url=client.base_url,
-                        token=client.token,
+                        client=client,
                         dev_url=dev_url,
                         source_device_id=device_id,
-                        source_imei="",
                         source_name=src_name,
                         target_unique_id=dev_target_id.strip(),
                     )

@@ -1,46 +1,43 @@
 """Модуль онлайн-ретрансляції телеметрії Prod -> Dev у реальному часі.
 
-Підключається до WebSocket Prod у режимі суворого читання (READ-ONLY)
-та дублює точки обраного об'єкта на Dev через OsmAnd HTTP-протокол (порт 5055).
+Отримує нові точки з Prod API (суворо в режимі читання) та миттєво
+дублює їх на Dev-сервер через OsmAnd HTTP-протокол (порт 5055).
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
 import requests
-import websocket
+
+from .models import parse_attributes, parse_ts
 
 
 class LiveRelayEngine:
-    """Потокобезпечний синглтон-рушій для онлайн-ретрансляції точок."""
+    """Потокобезпечний рушій ретрансляції точок."""
 
     def __init__(self):
         self.is_running = False
         self.thread: Optional[threading.Thread] = None
-        self.ws: Optional[websocket.WebSocketApp] = None
 
-        # Конфігурація активного сеансу
-        self.prod_ws_url = ""
-        self.prod_token = ""
+        # Параметри
+        self.client = None
         self.dev_target_url = ""
         self.source_device_id: Optional[int] = None
-        self.source_imei: str = ""
         self.source_name: str = ""
         self.target_unique_id: str = "dev-tacho-1"
 
         # Стан
-        self.status = "STOPPED"  # STOPPED, CONNECTING, STREAMING, ERROR
+        self.status = "STOPPED"  # STOPPED, STREAMING, ERROR
         self.status_message = "Міст зупинено"
-        self.prod_device_map: Dict[int, str] = {}  # {internal_id: uniqueId (IMEI)}
+        self.last_seen_pos_id: Optional[int] = None
 
         # Метрики та логи
         self.stats = {
-            "packets_in": 0,
             "packets_forwarded": 0,
             "errors": 0,
             "last_fuel": None,
@@ -55,73 +52,32 @@ class LiveRelayEngine:
         self.fuel_history = deque(maxlen=200)
         self.lock = threading.Lock()
 
-    def sync_devices(self, client) -> None:
-        """Синхронізує карту internal_id -> uniqueId через існуючий M2MClient."""
+    def forward_single_point(self, pos: Dict[str, Any]) -> bool:
+        """Пересилає одну точку на Dev."""
         try:
-            res = client.request("GET", "/api/devices")
-            if isinstance(res, list):
-                new_map = {}
-                for d in res:
-                    did = d.get("id")
-                    uid = str(d.get("uniqueId") or "")
-                    if did is not None:
-                        new_map[did] = uid
-                with self.lock:
-                    self.prod_device_map = new_map
-        except Exception:
-            pass
+            # Час точки
+            dt = parse_ts(pos.get("deviceTime") or pos.get("fixTime"))
+            ts = int(dt.timestamp()) if dt else int(time.time())
 
-    def forward_position(self, pos: Dict[str, Any]) -> None:
-        """Обробляє та передає точку, якщо вона належить обраному авто."""
-        dev_id = pos.get("deviceId")
-        with self.lock:
-            self.stats["packets_in"] += 1
+            speed_kmh = round(float(pos.get("speed", 0.0) or 0.0), 1)
 
-        # Фільтр: перевіряємо збіг за внутрішнім ID або за IMEI
-        is_match = False
-        if self.source_device_id and dev_id == self.source_device_id:
-            is_match = True
-        elif self.source_imei:
-            current_imei = self.prod_device_map.get(dev_id)
-            if current_imei and current_imei == self.source_imei:
-                is_match = True
-
-        if not is_match:
-            return
-
-        try:
-            # Час фіксації
-            fix_time = pos.get("fixTime")
-            if fix_time:
-                try:
-                    dt = datetime.fromisoformat(fix_time.replace("Z", "+00:00"))
-                    ts = int(dt.timestamp())
-                except Exception:
-                    ts = int(time.time())
-            else:
-                ts = int(time.time())
-
-            speed_raw = float(pos.get("speed", 0.0) or 0.0)
-            speed_kmh = round(speed_raw * 1.852, 1)
-
-            # Базовий запит для Traccar OsmAnd
             params: Dict[str, Any] = {
                 "id": self.target_unique_id,
                 "lat": pos.get("latitude", 0.0),
                 "lon": pos.get("longitude", 0.0),
                 "timestamp": ts,
-                "speed": round(speed_raw * 0.514444, 2),  # м/с
-                "bearing": pos.get("course", 0),
-                "altitude": pos.get("altitude", 0),
+                "speed": round(speed_kmh * 0.277778, 2),  # км/г -> м/с для OsmAnd
+                "bearing": int(pos.get("course", 0) or 0),
+                "altitude": int(pos.get("altitude", 0) or 0),
             }
 
-            # Витягуємо всі attributes (паливо, запалювання, tacho, CAN)
-            attrs = pos.get("attributes", {})
+            # Витягуємо attributes (паливо, запалювання, tacho, CAN)
+            attrs = parse_attributes(pos.get("attributes"))
             fuel = None
             ignition = None
             driver = None
 
-            if isinstance(attrs, dict):
+            if attrs:
                 for k, v in attrs.items():
                     if not isinstance(v, (dict, list)):
                         params[k] = v
@@ -162,9 +118,10 @@ class LiveRelayEngine:
                         "Паливо (л)": f"{fuel} л" if fuel is not None else "—",
                         "Швидкість": f"{speed_kmh} км/г",
                         "Запалювання": "ВКЛ" if ignition else "ВИМК",
-                        "Картка тахо": driver if driver else "—",
+                        "Картка тахо": str(driver) if driver else "—",
                         "Статус": "✅ 200 OK",
                     })
+                    return True
                 else:
                     self.stats["errors"] += 1
                     self.packet_log.appendleft({
@@ -175,84 +132,112 @@ class LiveRelayEngine:
                         "Швидкість": "—",
                         "Запалювання": "—",
                         "Картка тахо": "—",
-                        "Статус": f"❌ HTTP {resp.status_code}",
+                        "Статус": f"❌ Dev HTTP {resp.status_code}",
                     })
+                    return False
 
-        except Exception:
+        except Exception as e:
             with self.lock:
                 self.stats["errors"] += 1
+                self.packet_log.appendleft({
+                    "Час": datetime.now().strftime("%H:%M:%S"),
+                    "Джерело (Prod)": self.source_name,
+                    "Ціль (Dev)": self.target_unique_id,
+                    "Паливо (л)": "—",
+                    "Швидкість": "—",
+                    "Запалювання": "—",
+                    "Картка тахо": "—",
+                    "Статус": f"❌ Помилка: {str(e)[:40]}",
+                })
+            return False
 
     def _worker_loop(self) -> None:
-        headers = [f"Authorization: Bearer {self.prod_token}"]
+        """Основний цикл онлайн-зчитування нових точок."""
+        self.status = "STREAMING"
+        self.status_message = f"🟢 Активна ретрансляція: [{self.source_name}] ➡️ [{self.target_unique_id}]"
 
+        # 1. Початковий запит: беремо останню точку авто з Prod
+        try:
+            now = datetime.now(timezone.utc)
+            t_from = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            t_to = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            res = self.client.positions_page(
+                did=self.source_device_id,
+                date_from=t_from,
+                date_to=t_to,
+                page=1,
+                per_page=5,
+                order="DESC",
+            )
+            items = res.get("items", [])
+            if items:
+                # Беремо найсвіжішу точку, відправляємо на Dev і фіксуємо ID
+                latest = items[0]
+                self.last_seen_pos_id = latest.get("id")
+                self.forward_single_point(latest)
+        except Exception as ex:
+            # Якщо за останні 10 хв точок не було, не критично
+            pass
+
+        # 2. Неперервний цикл зчитування онлайн-потоку що 2 секунди
         while self.is_running:
             try:
-                self.status = "CONNECTING"
-                self.status_message = f"Підключення до сокета Prod: {self.prod_ws_url}"
+                now = datetime.now(timezone.utc)
+                t_from = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                t_to = (now + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-                def on_message(ws, msg):
-                    if not self.is_running:
-                        ws.close()
-                        return
-                    try:
-                        data = json.loads(msg)
-                        if "positions" in data:
-                            for p in data["positions"]:
-                                self.forward_position(p)
-                    except Exception:
-                        pass
-
-                def on_open(ws):
-                    self.status = "STREAMING"
-                    self.status_message = f"🟢 Активна ретрансляція: [{self.source_name}] ➡️ [{self.target_unique_id}]"
-
-                def on_close(ws, code, msg):
-                    self.status = "CONNECTING"
-                    self.status_message = "Перепідключення сокета..."
-
-                self.ws = websocket.WebSocketApp(
-                    self.prod_ws_url,
-                    header=headers,
-                    on_open=on_open,
-                    on_message=on_message,
-                    on_close=on_close,
+                res = self.client.positions_page(
+                    did=self.source_device_id,
+                    date_from=t_from,
+                    date_to=t_to,
+                    page=1,
+                    per_page=20,
+                    order="ASC",
                 )
-                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+                items = res.get("items", [])
+
+                for pos in items:
+                    pos_id = pos.get("id")
+                    if self.last_seen_pos_id is None or (pos_id and pos_id > self.last_seen_pos_id):
+                        self.forward_single_point(pos)
+                        if pos_id:
+                            self.last_seen_pos_id = pos_id
+
+                self.status = "STREAMING"
+                self.status_message = f"🟢 Активна ретрансляція: [{self.source_name}] ➡️ [{self.target_unique_id}]"
 
             except Exception as e:
-                self.status = "ERROR"
-                self.status_message = f"Помилка з'єднання: {e}"
+                self.status = "STREAMING"
+                self.status_message = f"⚠️ Помилка читання з Prod (повтор...): {str(e)[:50]}"
 
-            if self.is_running:
-                time.sleep(4)
+            # Інтервал онлайн-перевірки
+            for _ in range(20):
+                if not self.is_running:
+                    break
+                time.sleep(0.1)
 
         self.status = "STOPPED"
         self.status_message = "Міст зупинено"
 
     def start(
         self,
-        base_url: str,
-        token: str,
+        client,
         dev_url: str,
-        source_device_id: Optional[int],
-        source_imei: str,
+        source_device_id: int,
         source_name: str,
         target_unique_id: str,
     ) -> None:
-        """Запуск ретрансляції у фоні."""
+        """Запуск онлайн-трансляції у фоні."""
         if self.is_running:
             return
 
-        clean_url = base_url.strip().rstrip("/")
-        ws_scheme = "wss://" if clean_url.startswith("https://") else "ws://"
-        host_part = clean_url.replace("https://", "").replace("http://", "")
-        self.prod_ws_url = f"{ws_scheme}{host_part}/api/socket"
-        self.prod_token = token
+        self.client = client
         self.dev_target_url = dev_url.strip()
         self.source_device_id = source_device_id
-        self.source_imei = source_imei
         self.source_name = source_name
         self.target_unique_id = target_unique_id.strip()
+        self.last_seen_pos_id = None
         self.is_running = True
 
         self.thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -261,11 +246,6 @@ class LiveRelayEngine:
     def stop(self) -> None:
         """Зупинка ретрансляції."""
         self.is_running = False
-        if self.ws:
-            try:
-                self.ws.close()
-            except Exception:
-                pass
         self.status = "STOPPED"
         self.status_message = "Зупинено користувачем"
 
