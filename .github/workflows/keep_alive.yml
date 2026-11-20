@@ -23,26 +23,27 @@ jobs:
           VAR_URL: ${{ vars.STREAMLIT_URL }}
           INPUT_URL: ${{ inputs.app_url }}
         run: |
-          # Визначаємо цільовий URL за пріоритетом: ручний ввід -> секрет -> змінна -> дефолт
           TARGET_URL="${INPUT_URL:-${SECRET_URL:-${VAR_URL:-$DEFAULT_URL}}}"
           echo "🎯 Цільовий URL: $TARGET_URL"
-          echo "🕒 Час пінгу (UTC): $(date -u)"
+          echo "🕒 Час сервера GitHub (UTC): $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "🇺🇦 Локальний час (Київ):     $(TZ='Europe/Kyiv' date '+%Y-%m-%d %H:%M:%S %Z')"
 
-          # Виконуємо HTTP GET запит з браузерним User-Agent
-          RESPONSE=$(curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (StreamlitKeepAlive/1.0)" \
+          # Виконуємо HTTP GET без слідування за OAuth-редиректами (-L прибрано, щоб уникнути циклу 303 в приватних додатках)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (StreamlitKeepAlive/1.0)" \
             --connect-timeout 10 \
-            --max-time 30 \
-            -w "\n%{http_code}|%{time_total}" \
-            "$TARGET_URL")
+            --max-time 15 \
+            "$TARGET_URL" || echo "000")
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1 | cut -d'|' -f1)
-          TOTAL_TIME=$(echo "$RESPONSE" | tail -n1 | cut -d'|' -f2)
+          echo "📊 HTTP Status Code від роутера Streamlit: $HTTP_CODE"
 
-          echo "📊 HTTP Status Code: $HTTP_CODE"
-          echo "⏱️ Час відповіді: ${TOTAL_TIME}с"
-
+          # Для Streamlit Cloud статус 200 (публічний) або 302/303 (приватний з авторизацією) означає,
+          # що трафік зареєстровано, роутер активний, таймер сну скинуто.
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
-            echo "✅ Додаток активний! Streamlit контейнер не засне."
+            echo "✅ Успішно! Streamlit Cloud зафіксував активність і тримає контейнер живим."
+          elif [ "$HTTP_CODE" = "000" ]; then
+            echo "❌ Помилка підключення до сервера."
+            exit 1
           else
-            echo "⚠️ Отримано статус $HTTP_CODE. Якщо додаток спав — він прокидається."
+            echo "⚠️ Отримано статус $HTTP_CODE (роутер відповів, сесія оновлена)."
           fi
