@@ -11,7 +11,7 @@ class TestMultiLiveRelayEngine(unittest.TestCase):
         self.engine = MultiLiveRelayEngine()
         self.engine.routes.clear()
         self.engine.dev_target_url = "http://95.217.119.27:5055"
-        self.engine.tz_offset_sec = 7200
+        self.engine.tz_offset_sec = 0
 
     def test_add_and_toggle_route(self):
         self.engine.add_route(905, "DAF CA 1316 TT TACHO", "11861937062956496111")
@@ -63,9 +63,9 @@ class TestMultiLiveRelayEngine(unittest.TestCase):
         self.assertEqual(params["id"], "11861937062956496111")
         self.assertEqual(params["lat"], 50.451725)
         self.assertEqual(params["lon"], 23.437510)
-        # raw timestamp was 17:14:22 UTC + 7200 offset
+        # raw timestamp is UTC
         dt = datetime(2026, 11, 20, 17, 14, 22, tzinfo=timezone.utc)
-        self.assertEqual(params["timestamp"], int(dt.timestamp()) + 7200)
+        self.assertEqual(params["timestamp"], int(dt.timestamp()))
 
         # Check packet log does not contain unwanted UI columns
         log_entry = r.packet_log[0]

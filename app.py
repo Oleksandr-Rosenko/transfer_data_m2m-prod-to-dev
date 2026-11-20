@@ -655,6 +655,19 @@ def live_relay_page() -> None:
     # Професійні стилі Shadcn UI / Material Design
     st.markdown("""
     <style>
+    /* М'який фон для контрасту карток */
+    .stApp {
+        background-color: #f8fafc;
+    }
+
+    /* Стилізація контурних блоків-карток */
+    div[data-testid="stVerticalBlockBorderWrapper"] > div {
+        background-color: #ffffff !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.04) !important;
+    }
+
     /* Стилізація карток показників (KPI) */
     .kpi-card {
         background: #ffffff;
@@ -687,32 +700,35 @@ def live_relay_page() -> None:
     .telemetry-grid {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
-        gap: 8px;
-        background: #f8fafc;
-        border: 1px solid #f1f5f9;
-        border-radius: 6px;
-        padding: 8px 12px;
-        margin-top: 8px;
+        gap: 12px;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin-top: 10px;
+        margin-bottom: 6px;
+        box-sizing: border-box;
     }
     .telemetry-item {
         display: flex;
         flex-direction: column;
+        justify-content: center;
     }
     .telemetry-label {
-        font-size: 10px;
+        font-size: 11px;
         color: #64748b;
         font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-bottom: 2px;
+        letter-spacing: 0.04em;
+        margin-bottom: 4px;
+        line-height: 1.2;
     }
     .telemetry-value {
-        font-size: 13px;
-        font-weight: 600;
-        color: #1e293b;
+        font-size: 14px;
+        font-weight: 700;
+        color: #0f172a;
+        line-height: 1.4;
         white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
     }
 
     /* Акуратні бейджі статусів */
@@ -775,6 +791,32 @@ def live_relay_page() -> None:
         border-radius: 4px;
         border: 1px solid #e2e8f0;
     }
+
+    /* Кольорові акцентні кнопки */
+    button[kind="primary"] {
+        background-color: #059669 !important;
+        border-color: #047857 !important;
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        border-radius: 6px !important;
+        box-shadow: 0 1px 2px 0 rgba(5, 150, 105, 0.2) !important;
+    }
+    button[kind="primary"]:hover {
+        background-color: #047857 !important;
+        border-color: #065f46 !important;
+    }
+    button[kind="secondary"] {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        color: #1e293b !important;
+        font-weight: 500 !important;
+        border-radius: 6px !important;
+    }
+    button[kind="secondary"]:hover {
+        background-color: #f1f5f9 !important;
+        border-color: #94a3b8 !important;
+        color: #0f172a !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -793,17 +835,17 @@ def live_relay_page() -> None:
         dev_port = c2.text_input("Порт (OsmAnd)", value="5055", key="live_port")
         tz_choice = c3.selectbox(
             "Часовий пояс Dev",
-            options=["+2 год (Київ, зима)", "+3 год (Київ, літо)", "+0 год (UTC)"],
+            options=["+0 год (UTC, стандартний для Dev)", "+2 год (Київ, зима)", "+3 год (Київ, літо)"],
             index=0,
             key="live_tz_opt",
-            help="Коригує мітку часу для протоколу OsmAnd під час запису в БД Dev."
+            help="Коригує мітку часу для протоколу OsmAnd. Dev-сервер очікує стандартний UTC і сам відображає його в київському часі."
         )
         tz_map = {
+            "+0 год (UTC, стандартний для Dev)": 0,
             "+2 год (Київ, зима)": 7200,
             "+3 год (Київ, літо)": 10800,
-            "+0 год (UTC)": 0,
         }
-        tz_offset_sec = tz_map.get(tz_choice, 7200)
+        tz_offset_sec = tz_map.get(tz_choice, 0)
 
         clean_host = dev_host.strip()
         if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
@@ -816,7 +858,7 @@ def live_relay_page() -> None:
     with st.container(border=True):
         st.subheader("2. Додати авто для ретрансляції")
         
-        col_q, col_sel, col_target, col_add = st.columns([2.2, 3.4, 1.8, 1.2])
+        col_q, col_sel, col_target, col_add = st.columns([2.2, 3.4, 1.8, 1.2], vertical_alignment="bottom")
         with col_q:
             search_q = st.text_input(
                 "Пошук на Prod",
@@ -853,9 +895,8 @@ def live_relay_page() -> None:
             target_id_val = st.text_input("ID об'єкта на Dev", value=suggested_id, key="multi_target_id")
 
         with col_add:
-            st.write("")  # відступ під лейбл
             can_add = bool(connected and selected_did and target_id_val.strip() and len(current_routes) < 10)
-            if st.button("Додати авто", icon=":material/add:", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
+            if st.button("Додати авто", icon=":material/add:", type="primary", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
                 src_name = names.get(selected_did, f"ID {selected_did}")
                 engine.add_route(selected_did, src_name, target_id_val.strip())
                 st.rerun()
@@ -948,7 +989,7 @@ def live_relay_page() -> None:
             for r in routes:
                 with st.container(border=True):
                     # Заголовок картки авто з бейджем статусу та кнопками керування
-                    c_head, c_tog, c_pts, c_del = st.columns([4.2, 1.2, 1.2, 0.6])
+                    c_head, c_tog, c_pts, c_del = st.columns([5.0, 1.2, 1.2, 0.6], vertical_alignment="center")
                     with c_head:
                         if not is_active:
                             badge_html = '<span class="mui-badge mui-badge-stopped">ЗУПИНЕНО</span>'
@@ -962,7 +1003,7 @@ def live_relay_page() -> None:
                             badge_html = '<span class="mui-badge mui-badge-wait">ОЧІКУВАННЯ</span>'
 
                         st.markdown(f"""
-                        <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
                             {badge_html}
                             <span style="font-size: 15px; font-weight: 600; color: #0f172a;">{r.source_name}</span>
                             <span style="color: #94a3b8; font-size: 13px;">➔</span>
@@ -972,11 +1013,11 @@ def live_relay_page() -> None:
 
                     with c_tog:
                         if r.enabled and is_active:
-                            if st.button("Пауза", icon=":material/pause:", key=f"tog_{r.device_id}", use_container_width=True):
+                            if st.button("Пауза", icon=":material/pause:", key=f"tog_{r.device_id}", type="secondary", use_container_width=True):
                                 engine.set_route_enabled(r.device_id, False)
                                 st.rerun()
                         else:
-                            if st.button("Старт", icon=":material/play_arrow:", key=f"tog_{r.device_id}", use_container_width=True):
+                            if st.button("Старт", icon=":material/play_arrow:", key=f"tog_{r.device_id}", type="primary", use_container_width=True):
                                 engine.set_route_enabled(r.device_id, True)
                                 if not is_active and can_start:
                                     engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
@@ -986,12 +1027,12 @@ def live_relay_page() -> None:
                         is_inspecting = (S.get("live_inspect_did") == r.device_id)
                         btn_label = "Сховати" if is_inspecting else "Точки"
                         btn_icon = ":material/close:" if is_inspecting else ":material/terminal:"
-                        if st.button(btn_label, icon=btn_icon, key=f"insp_{r.device_id}", use_container_width=True):
+                        if st.button(btn_label, icon=btn_icon, key=f"insp_{r.device_id}", type="secondary", use_container_width=True):
                             S.live_inspect_did = None if is_inspecting else r.device_id
                             st.rerun()
 
                     with c_del:
-                        if st.button("", icon=":material/delete:", key=f"del_{r.device_id}", help="Видалити це авто з конфігурації"):
+                        if st.button("", icon=":material/delete:", key=f"del_{r.device_id}", type="secondary", use_container_width=True, help="Видалити це авто з конфігурації"):
                             engine.remove_route(r.device_id)
                             if S.get("live_inspect_did") == r.device_id:
                                 S.live_inspect_did = None

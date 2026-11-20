@@ -61,7 +61,7 @@ class MultiLiveRelayEngine:
         self.thread: Optional[threading.Thread] = None
         self.client = None
         self.dev_target_url = ""
-        self.tz_offset_sec = 7200  # За замовчуванням +2 години (Київський час)
+        self.tz_offset_sec = 0  # 0 = стандартний UTC timestamp (Dev сам додає локальну зону в інтерфейсі)
 
         # Словник маршрутів {device_id: RouteItem}
         self.routes: Dict[int, RouteItem] = {}
@@ -180,7 +180,7 @@ class MultiLiveRelayEngine:
         try:
             dt = parse_ts(pos.get("deviceTime") or pos.get("fixTime") or pos.get("serverTime"))
             raw_ts = int(dt.timestamp()) if dt else int(time.time())
-            offset = getattr(self, "tz_offset_sec", 7200)
+            offset = getattr(self, "tz_offset_sec", 0)
             ts = raw_ts + offset
 
             speed_kmh = round(float(pos.get("speed", 0.0) or 0.0), 1)
@@ -339,7 +339,7 @@ class MultiLiveRelayEngine:
             for r in self.routes.values():
                 r.status = "IDLE"
 
-    def start(self, client, dev_url: str, tz_offset_sec: int = 7200) -> None:
+    def start(self, client, dev_url: str, tz_offset_sec: int = 0) -> None:
         """Запуск ретрансляції всіх налаштованих авто."""
         self.client = client
         self.dev_target_url = dev_url.strip()
