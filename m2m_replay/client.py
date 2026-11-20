@@ -112,6 +112,16 @@ class M2MClient:
         base = {"page": 1, "per_page": limit, "order": "ASC", "orderBy": "DEVICE_NAME"}
         modes = ["DEVICE_NAME", "UNIQUE_ID"] if query else [None]
         found: dict[int, dict] = {}
+
+        # Якщо ввели ID об'єкта числом — перевіримо прямий пошук за ID
+        if query.isdigit():
+            try:
+                single = self.get_device(int(query))
+                if isinstance(single, dict) and single.get("id"):
+                    found[single["id"]] = {"id": single["id"], "name": single.get("name") or str(single["id"])}
+            except Exception:
+                pass
+
         for mode in modes:
             params = dict(base)
             if mode:

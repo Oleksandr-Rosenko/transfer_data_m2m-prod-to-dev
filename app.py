@@ -811,31 +811,47 @@ def live_relay_page() -> None:
         else:
             dev_target_url = f"{clean_host}:{dev_port.strip()}"
 
-    # 2. Додавання авто (пошук і дропдаун — один уніфікований елемент)
+    # 2. Додавання авто через пошук по Prod
     current_routes = engine.get_routes()
     with st.container(border=True):
         st.subheader("2. Додати авто для ретрансляції")
+        
+        col_q, col_sel, col_target, col_add = st.columns([2.2, 3.4, 1.8, 1.2])
+        with col_q:
+            search_q = st.text_input(
+                "Пошук на Prod",
+                placeholder="Введіть 1316, назву чи IMEI",
+                key="live_car_search_q",
+                disabled=not connected,
+                help="Надішле запит до бази Prod для пошуку авто за назвою, номером, IMEI або ID."
+            )
+        
         devices: list[dict] = []
         if connected:
             try:
-                devices = search_devices(client, "", limit=250)
+                devices = search_devices(client, search_q.strip(), limit=50)
             except ApiError as e:
-                st.error(f"Не вдалося отримати список об'єктів: {e}")
+                st.error(f"Не вдалося виконати пошук об'єктів: {e}")
         names = {d["id"]: d["name"] for d in devices}
 
-        col_sel, col_target, col_add = st.columns([3.2, 2.0, 1.3])
         with col_sel:
-            selected_did = st.selectbox(
-                "Пошук та вибір авто з Prod",
-                options=list(names.keys()),
-                format_func=lambda i: f"{names[i]} (ID {i})",
-                disabled=not devices,
-                key="unified_car_select",
-                help="Введіть будь-яку частину назви або номера прямо тут для швидкої фільтрації."
-            )
+            if not devices and search_q.strip():
+                st.selectbox("Знайдені авто (0)", options=["Не знайдено жодного авто"], disabled=True, key="unified_car_select")
+                selected_did = None
+            else:
+                lbl = f"Знайдені авто ({len(devices)})" if search_q.strip() else "Оберіть авто зі списку"
+                selected_did = st.selectbox(
+                    lbl,
+                    options=list(names.keys()),
+                    format_func=lambda i: f"{names[i]} (ID {i})",
+                    disabled=not devices,
+                    key="unified_car_select",
+                )
+
         with col_target:
             suggested_id = f"dev-tacho-{len(current_routes) + 1}"
             target_id_val = st.text_input("ID об'єкта на Dev", value=suggested_id, key="multi_target_id")
+
         with col_add:
             st.write("")  # відступ під лейбл
             can_add = bool(connected and selected_did and target_id_val.strip() and len(current_routes) < 10)
