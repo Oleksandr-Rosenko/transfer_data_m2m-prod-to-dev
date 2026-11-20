@@ -3,3 +3,4 @@ requests>=2.31.0
 pandas>=2.0.0
 python-dateutil>=2.8.2
 tzdata
+websocket-client>=1.7.0

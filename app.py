@@ -18,6 +18,7 @@ from m2m_replay.order import (
     export_rows, fmt_local, mileage_mismatch, rows_to_csv, scan_pages, segment_reason,
 )
 from m2m_replay.replay import PROTOCOLS, TransferConfig, TransferJob, build_preview, check_connection
+from m2m_replay.live import get_live_engine
 
 try:
     LOCAL_TZ = ZoneInfo("Europe/Kyiv")
@@ -644,9 +645,139 @@ def fix_page() -> None:
             new_job.start()
             st.rerun()
 
+# ---------------------------------------------------------------- екран 3: онлайн ретрансляція
+def live_relay_page() -> None:
+    client: M2MClient | None = S.client
+    connected = bool(client and client.token)
+    engine = get_live_engine()
+
+    st.title("📡 Онлайн ретрансляція Prod ➡️ Dev")
+    st.markdown(
+        "> 🛡️ **Гарантія безпеки (Strictly Read-Only):** Prod лише пасивно слухається через WebSocket (`/api/socket`). "
+        "Жодних запитів на зміну (POST/PUT/DELETE) на бойовий сервер не надсилається. "
+        "Запис точок здійснюється виключно на ваш Dev-сервер."
+    )
+
+    if not connected:
+        st.info("Увійдіть у Prod у бічній панелі ліворуч, щоб завантажити список об'єктів і підключити живий потік.")
+
+    # 1. Джерело (Prod)
+    with st.container(border=True):
+        st.subheader("1. Об'єкт-джерело (Prod)")
+        q = st.text_input("Пошук авто", placeholder="Назва або IMEI", key="live_q", disabled=not connected)
+        devices: list[dict] = []
+        if connected:
+            try:
+                devices = search_devices(client, q)
+            except ApiError as e:
+                st.error(f"Не вдалося отримати список об'єктів: {e}")
+        names = {d["id"]: d["name"] for d in devices}
+        device_id = st.selectbox(
+            "Оберіть авто з Prod",
+            options=list(names),
+            format_func=lambda i: f"{names[i]} (ID {i})",
+            disabled=not devices,
+            key="live_src_device",
+        )
+        if connected:
+            st.caption(f"Знайдено об'єктів: {len(devices)}.")
+
+    # 2. Призначення (Dev)
+    with st.container(border=True):
+        st.subheader("2. Куди транслювати (Dev)")
+        c1, c2, c3 = st.columns([2, 1, 2])
+        dev_host = c1.text_input("Домен або IP Dev-сервера", value=secret("DEV_HOST", "dev.m2m-ua.com"), key="live_host")
+        dev_port = c2.text_input("Порт (OsmAnd)", value="5055", key="live_port")
+        dev_target_id = c3.text_input("Dev Unique ID (новий об'єкт на Dev)", value="dev-tacho-1", key="live_target_id")
+        st.caption("ℹ️ Точки надсилаються в OsmAnd порт 5055 Traccar зі збереженням усіх атрибутів (паливо, тахо, CAN, запалювання).")
+
+    # 3. Керування ретрансляцією
+    col_btn, col_info = st.columns([1, 2])
+    with col_btn:
+        if not engine.is_running:
+            can_start = connected and device_id and dev_host.strip() and dev_port.strip() and dev_target_id.strip()
+            if st.button("🚀 РЕТРАНСЛЮВАТИ", type="primary", disabled=not can_start, use_container_width=True, key="live_btn_start"):
+                engine.sync_devices(client)
+                src_name = names.get(device_id, f"ID {device_id}")
+                clean_host = dev_host.strip()
+                if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
+                    dev_url = f"http://{clean_host}:{dev_port.strip()}"
+                else:
+                    dev_url = f"{clean_host}:{dev_port.strip()}"
+
+                engine.start(
+                    base_url=client.base_url,
+                    token=client.token,
+                    dev_url=dev_url,
+                    source_device_id=device_id,
+                    source_imei="",
+                    source_name=src_name,
+                    target_unique_id=dev_target_id.strip(),
+                )
+                st.rerun()
+        else:
+            if st.button("⏹️ ЗУПИНИТИ", use_container_width=True, key="live_btn_stop"):
+                engine.stop()
+                st.rerun()
+
+    with col_info:
+        if engine.status == "STREAMING":
+            st.success(f"### {engine.status_message}")
+        elif engine.status == "CONNECTING":
+            st.warning(f"### ⏳ {engine.status_message}")
+        else:
+            st.info("### ⏸️ Міст зупинено. Оберіть параметри та натисніть «Ретранслювати».")
+
+    st.divider()
+
+    # 4. Онлайн-моніторинг (авто-оновлення що 2 сек)
+    @st.fragment(run_every="2s")
+    def render_live_panel():
+        with engine.lock:
+            stats = engine.stats.copy()
+            logs = list(engine.packet_log)
+            fuels = list(engine.fuel_history)
+
+        st.subheader("📊 Онлайн-моніторинг потоку телеметрії")
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Передано на Dev", stats["packets_forwarded"])
+        m2.metric("Помилок Dev", stats["errors"])
+        fuel_s = f"{stats['last_fuel']} л" if stats['last_fuel'] is not None else "—"
+        m3.metric("Паливо (Live)", fuel_s)
+        m4.metric("Швидкість", f"{stats['last_speed']} км/г")
+        ign_s = "ВКЛ (ON)" if stats['last_ignition'] is True else ("ВИМК" if stats['last_ignition'] is False else "—")
+        m5.metric("Запалювання", ign_s)
+        driver_s = stats["last_driver"] or "—"
+        m6.metric("Картка тахо", driver_s)
+
+        t_table, t_chart, t_gps = st.tabs(["📋 Живий потік пакетів", "⛽ Графік палива (Заправки/Зливи)", "🗺️ Локація"])
+        with t_table:
+            if logs:
+                st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
+            else:
+                st.write("Очікування точок від обраного об'єкта...")
+
+        with t_chart:
+            if fuels and len(fuels) > 1:
+                df_f = pd.DataFrame(fuels)
+                st.line_chart(df_f.set_index("time")["fuel"], use_container_width=True)
+                st.caption("📈 Стрибок вгору = заправка, падіння при швидкості 0 = злив.")
+            else:
+                st.info("Дані палива з'являться на графіку під час надходження нових точок.")
+
+        with t_gps:
+            if stats["last_lat"] and stats["last_lon"]:
+                df_pos = pd.DataFrame([{"lat": stats["last_lat"], "lon": stats["last_lon"]}])
+                st.map(df_pos, zoom=14)
+                st.caption(f"Останні координати: {stats['last_lat']}, {stats['last_lon']} (Час: {stats['last_time']})")
+            else:
+                st.info("Координати ще не надходили.")
+
+    render_live_panel()
+
 # ---------------------------------------------------------------- запуск
 sidebar_login()
-tab_transfer, tab_fix = st.tabs(["Перенос Prod → Dev", "Виправлення порядку точок"])
+tab_transfer, tab_fix, tab_live = st.tabs(["Перенос Prod → Dev", "Виправлення порядку точок", "📡 Онлайн ретрансляція"])
 with tab_transfer:
     if S.stage == "progress" and S.job is not None:
         progress_page()
@@ -654,3 +785,5 @@ with tab_transfer:
         setup_page()
 with tab_fix:
     fix_page()
+with tab_live:
+    live_relay_page()
