@@ -80,10 +80,10 @@ def host_label(url: str) -> str:
     return urlparse(url if "//" in url else f"//{url}").hostname or url
 
 
-def search_devices(client: M2MClient, q: str) -> list[dict]:
-    key = (client.base_url, q.strip())
+def search_devices(client: M2MClient, q: str = "", limit: int = 250) -> list[dict]:
+    key = (client.base_url, q.strip(), limit)
     if key not in S.search_cache:
-        S.search_cache[key] = client.search_devices(q.strip())
+        S.search_cache[key] = client.search_devices(q.strip(), limit=limit)
     return S.search_cache[key]
 
 
@@ -650,13 +650,14 @@ def live_relay_page() -> None:
     client: M2MClient | None = S.client
     connected = bool(client and client.token)
     engine = get_multi_live_engine()
+    S.setdefault("live_inspect_did", None)
 
     st.title("Онлайн ретрансляція")
-    st.caption("Мульти-об'єктний стрім телеметрії з Prod на Dev у реальному часі (до 10 об'єктів).")
+    st.caption("Мульти-об'єктний міст телеметрії з Prod на Dev у реальному часі (до 10 об'єктів).")
     st.caption("🛡️ **Prod у режимі читання:** запити йдуть суворо на отримання точок без модифікації бойового сервера.")
 
     if not connected:
-        st.info("Увійдіть у Prod у бічній панелі ліворуч.")
+        st.info("Увійдіть у Prod у бічній панелі ліворуч, щоб завантажити авто та керувати ретрансляцією.")
 
     # 1. Призначення (Dev)
     with st.container(border=True):
@@ -684,121 +685,185 @@ def live_relay_page() -> None:
         else:
             dev_target_url = f"{clean_host}:{dev_port.strip()}"
 
-    # 2. Додавання об'єктів у список (до 10)
+    # 2. Додавання авто (пошук і дропдаун — один уніфікований елемент)
     current_routes = engine.get_routes()
     with st.container(border=True):
-        st.subheader("2. Маршрути авто (до 10 об'єктів)")
-        
-        # Пошук та вибір авто з Prod
-        q = st.text_input("Пошук авто в Prod", placeholder="Назва або IMEI", key="live_search_car", disabled=not connected)
+        st.subheader("2. Додати авто для ретрансляції")
         devices: list[dict] = []
         if connected:
             try:
-                devices = search_devices(client, q)
+                devices = search_devices(client, "", limit=250)
             except ApiError as e:
                 st.error(f"Не вдалося отримати список об'єктів: {e}")
         names = {d["id"]: d["name"] for d in devices}
 
-        col_sel, col_target, col_add = st.columns([3, 2, 1])
+        col_sel, col_target, col_add = st.columns([3.2, 2.0, 1.2])
         with col_sel:
             selected_did = st.selectbox(
-                "Авто з Prod",
-                options=list(names),
+                "Пошук та вибір авто з Prod",
+                options=list(names.keys()),
                 format_func=lambda i: f"{names[i]} (ID {i})",
                 disabled=not devices,
-                key="multi_select_car"
+                key="unified_car_select",
+                help="Введіть будь-яку частину назви або номера прямо тут для швидкої фільтрації."
             )
         with col_target:
             suggested_id = f"dev-tacho-{len(current_routes) + 1}"
             target_id_val = st.text_input("ID об'єкта на Dev", value=suggested_id, key="multi_target_id")
         with col_add:
-            st.write("") # вертикальний відступ
+            st.write("")  # відступ під лейбл
             can_add = bool(connected and selected_did and target_id_val.strip() and len(current_routes) < 10)
             if st.button("➕ Додати", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
                 src_name = names.get(selected_did, f"ID {selected_did}")
                 engine.add_route(selected_did, src_name, target_id_val.strip())
                 st.rerun()
 
-        # Список уже доданих маршрутів
-        if current_routes:
-            st.caption(f"Налаштовано об'єктів: {len(current_routes)} / 10")
-            for r in current_routes:
-                c_info, c_del = st.columns([5, 1])
-                with c_info:
-                    st.markdown(f"**{r.source_name}** ➡️ `{r.target_unique_id}`")
-                with c_del:
-                    if st.button("✕", key=f"del_route_{r.device_id}", disabled=engine.is_running):
-                        engine.remove_route(r.device_id)
-                        st.rerun()
-        else:
-            st.caption("Маршрути ще не додані. Оберіть авто, вкажіть його ID на Dev та натисніть «➕ Додати».")
-
-    # 3. Керування ретрансляцією
-    current_routes = engine.get_routes()
-    can_start = bool(connected and current_routes and dev_host.strip() and dev_port.strip())
-
-    with st.container(border=True):
-        col_btn, col_info = st.columns([1, 2])
-        with col_btn:
-            if not engine.is_running:
-                btn_label = f"Почати ретрансляцію ({len(current_routes)})" if current_routes else "Почати ретрансляцію"
-                if st.button(btn_label, type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
-                    engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
-                    st.rerun()
-            else:
-                if st.button("Зупинити всі", type="secondary", use_container_width=True, key="live_stop_all"):
-                    engine.stop()
-                    st.rerun()
-
-        with col_info:
-            if engine.is_running:
-                st.success(f"🟢 **В ефірі:** активний стрім для {len(current_routes)} авто (з {engine.started_at})")
-            else:
-                st.caption("Міст зупинено. Налаштуйте об'єкти та натисніть «Почати ретрансляцію».")
-
-    # 4. Загальний дашборд та Live-статуси об'єктів (авто-оновлення що 2 сек)
+    # 3. Авто-оновлюваний дашборд та автопарк (що 2 сек)
     @st.fragment(run_every="2s")
     def render_multi_dashboard():
         with engine.lock:
             total_sent = engine.total_packets_forwarded
             total_errs = engine.total_errors
             routes = list(engine.routes.values())
-            logs = list(engine.packet_log)
+            all_logs = list(engine.packet_log)
             is_active = engine.is_running
+            started_at = engine.started_at
 
+        # Загальний моніторинг
         with st.container(border=True):
-            st.subheader("Загальний моніторинг")
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Всього на Dev", fmt_n(total_sent))
-            active_cnt = len([r for r in routes if r.enabled]) if is_active else 0
-            d2.metric("Активних авто", f"{active_cnt} / {len(routes)}")
-            d3.metric("Помилок Dev", total_errs)
-            d4.metric("Dev Сервер", "Порт 5055")
+            st.subheader("Загальний моніторинг ретрансляції")
+            c_btn, c_stat = st.columns([1.5, 2.5])
+            can_start = bool(connected and routes and dev_host.strip() and dev_port.strip())
 
-        if routes:
-            with st.container(border=True):
-                st.subheader("Статуси по кожному авто")
-                table_rows = []
-                for r in routes:
-                    st_label = "🟢 Стрімінг" if r.status == "STREAMING" else ("🔴 Помилка" if r.status == "ERROR" else "⚪ Очікування")
-                    fuel_text = f"{r.fuel} л" if r.fuel is not None else "—"
-                    ign_text = "ВКЛ (ON)" if r.ignition is True else ("ВИМК" if r.ignition is False else "—")
-                    table_rows.append({
-                        "Авто (Prod)": r.source_name,
-                        "ID на Dev": r.target_unique_id,
-                        "Швидкість": f"{r.speed_kmh} км/г",
-                        "Паливо": fuel_text,
-                        "Запалювання": ign_text,
-                        "Картка тахо": r.driver or "—",
-                        "Пакети": r.packets_count,
-                        "Останній час": r.last_time,
-                        "Статус": st_label
-                    })
-                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+            with c_btn:
+                if not is_active:
+                    btn_text = f"▶️ Запустити всі ({len(routes)})" if routes else "▶️ Запустити всі"
+                    if st.button(btn_text, type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
+                        engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
+                        st.rerun()
+                else:
+                    if st.button("⏸️ Зупинити всі", type="secondary", use_container_width=True, key="live_stop_all"):
+                        engine.stop()
+                        st.rerun()
 
-        if logs:
-            with st.expander("Останні передані точки (Live Feed)", expanded=False):
-                st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
+            with c_stat:
+                if is_active:
+                    active_cnt = len([r for r in routes if r.enabled])
+                    st.success(f"🟢 **В ефірі:** стрім для {active_cnt} із {len(routes)} авто (активовано з {started_at})")
+                else:
+                    st.info("⏸️ **Ретрансляція зупинена.** Натисніть «Запустити всі» або старт на окремому авто.")
+
+            st.divider()
+
+            # 3 зрозумілі та чіткі KPI-картки
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                st.metric("📦 Передано пакетів", f"{total_sent} шт")
+            with k2:
+                active_cnt = len([r for r in routes if r.enabled]) if is_active else 0
+                st.metric("🚗 Активних авто", f"{active_cnt} / {len(routes)}")
+            with k3:
+                st.metric("🎯 Dev Сервер", f"{dev_host.strip()}:{dev_port.strip()}")
+
+        # Автопарк на ретрансляції (статуси + кнопки для кожного авто)
+        st.subheader(f"Автопарк на ретрансляції ({len(routes)} / 10)")
+        if not routes:
+            st.caption("Маршрути ще не додані. Оберіть авто вище та натисніть «➕ Додати».")
+        else:
+            for r in routes:
+                with st.container(border=True):
+                    # Заголовок картки авто з бейджем статусу та кнопками керування
+                    c_head, c_tog, c_pts, c_del = st.columns([3.8, 1.2, 1.3, 0.7])
+                    with c_head:
+                        if not is_active:
+                            badge = "⏸️ ЗУПИНЕНО"
+                        elif not r.enabled:
+                            badge = "⏸️ НА ПАУЗІ"
+                        elif r.status == "STREAMING":
+                            badge = "🟢 В ЕФІРІ"
+                        elif r.status == "ERROR":
+                            badge = f"🔴 Dev {r.last_error or 'Помилка'}"
+                        else:
+                            badge = "🟡 ОЧІКУВАННЯ"
+                        st.markdown(f"**{badge}** &nbsp; | &nbsp; **{r.source_name}** ➔ `{r.target_unique_id}`")
+
+                    with c_tog:
+                        if r.enabled and is_active:
+                            if st.button("⏸️ Пауза", key=f"tog_{r.device_id}", use_container_width=True):
+                                engine.toggle_route(r.device_id)
+                                st.rerun()
+                        else:
+                            if st.button("▶️ Старт", key=f"tog_{r.device_id}", use_container_width=True):
+                                engine.toggle_route(r.device_id)
+                                if not is_active and can_start:
+                                    engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
+                                st.rerun()
+
+                    with c_pts:
+                        is_inspecting = (S.get("live_inspect_did") == r.device_id)
+                        btn_label = "✕ Сховати" if is_inspecting else "📋 Точки"
+                        if st.button(btn_label, key=f"insp_{r.device_id}", use_container_width=True):
+                            S.live_inspect_did = None if is_inspecting else r.device_id
+                            st.rerun()
+
+                    with c_del:
+                        if st.button("🗑️", key=f"del_{r.device_id}", help="Видалити це авто з конфігурації"):
+                            engine.remove_route(r.device_id)
+                            if S.get("live_inspect_did") == r.device_id:
+                                S.live_inspect_did = None
+                            st.rerun()
+
+                    # Живі показники останнього пакету
+                    m1, m2, m3, m4, m5, m6 = st.columns(6)
+                    m1.metric("Швидкість", f"{r.speed_kmh} км/г")
+                    m2.metric("Паливо", f"{r.fuel} л" if r.fuel is not None else "—")
+                    ign_disp = "ВКЛ" if r.ignition is True else ("ВИМК" if r.ignition is False else "—")
+                    m3.metric("Запалювання", ign_disp)
+                    m4.metric("Картка тахо", r.driver or "—")
+                    m5.metric("Останній час", r.last_time)
+                    m6.metric("Пакети", f"{r.packets_count} (пом: {r.errors_count})")
+
+                    # Вікно детальних лайв-точок саме цього об'єкта
+                    if S.get("live_inspect_did") == r.device_id:
+                        st.divider()
+                        st.markdown(f"##### 📋 Останні передані точки телеметрії: **{r.source_name}**")
+                        car_logs = list(r.packet_log)
+                        if car_logs:
+                            df_car = pd.DataFrame(car_logs)
+                            cols_to_show = [c for c in df_car.columns if c != "device_id"]
+                            st.dataframe(
+                                df_car[cols_to_show],
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "Сирі параметри (Telemetry)": st.column_config.TextColumn(
+                                        "Сирі параметри (Telemetry)",
+                                        help="Повний список датчиків та параметрів, які передав трекер на Dev",
+                                        width="large",
+                                    ),
+                                    "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
+                                }
+                            )
+                        else:
+                            st.caption("Очікування надходження перших точок від цього авто...")
+
+        # Загальний потік точок (якщо не вибрано конкретне авто)
+        if not S.get("live_inspect_did") and all_logs:
+            with st.expander("Останні передані точки (Загальний потік усіх авто)", expanded=False):
+                df_all = pd.DataFrame(all_logs)
+                cols_to_show = [c for c in df_all.columns if c != "device_id"]
+                st.dataframe(
+                    df_all[cols_to_show],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Сирі параметри (Telemetry)": st.column_config.TextColumn(
+                            "Сирі параметри (Telemetry)",
+                            width="large",
+                        ),
+                        "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
+                    }
+                )
 
     render_multi_dashboard()
 

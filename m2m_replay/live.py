@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -38,8 +40,10 @@ class RouteItem:
     fuel: Optional[float] = None
     ignition: Optional[bool] = None
     driver: Optional[str] = None
-    status: str = "IDLE"  # IDLE, STREAMING, ERROR
+    status: str = "IDLE"  # IDLE, STREAMING, WAITING, ERROR, PAUSED
     last_error: str = ""
+    latest_params_raw: str = ""
+    packet_log: deque = field(default_factory=lambda: deque(maxlen=40))
 
 
 class MultiLiveRelayEngine:
@@ -59,8 +63,53 @@ class MultiLiveRelayEngine:
         self.total_packets_forwarded = 0
         self.total_errors = 0
         self.started_at: Optional[str] = None
-        self.packet_log = deque(maxlen=60)
+        self.packet_log = deque(maxlen=80)
         self.lock = threading.Lock()
+
+        # Автоматичне відновлення збережених маршрутів
+        self.load_cache()
+
+    def _get_cache_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / ".live_routes.json"
+
+    def load_cache(self) -> None:
+        """Завантажує збережені маршрути з диску."""
+        try:
+            fpath = self._get_cache_path()
+            if fpath.exists():
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                with self.lock:
+                    for it in data:
+                        did = it.get("device_id")
+                        if did:
+                            self.routes[did] = RouteItem(
+                                device_id=did,
+                                source_name=it.get("source_name", f"ID {did}"),
+                                target_unique_id=it.get("target_unique_id", ""),
+                                enabled=it.get("enabled", True),
+                            )
+        except Exception:
+            pass
+
+    def save_cache(self) -> None:
+        """Зберігає поточні маршрути на диск для відновлення після перезапуску."""
+        try:
+            fpath = self._get_cache_path()
+            with self.lock:
+                data = [
+                    {
+                        "device_id": r.device_id,
+                        "source_name": r.source_name,
+                        "target_unique_id": r.target_unique_id,
+                        "enabled": r.enabled,
+                    }
+                    for r in self.routes.values()
+                ]
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def add_route(self, device_id: int, source_name: str, target_unique_id: str) -> None:
         """Додає або оновлює маршрут авто."""
@@ -68,17 +117,37 @@ class MultiLiveRelayEngine:
             if device_id in self.routes:
                 self.routes[device_id].target_unique_id = target_unique_id.strip()
                 self.routes[device_id].source_name = source_name
+                self.routes[device_id].enabled = True
             else:
                 self.routes[device_id] = RouteItem(
                     device_id=device_id,
                     source_name=source_name,
                     target_unique_id=target_unique_id.strip(),
+                    enabled=True,
                 )
+        self.save_cache()
 
     def remove_route(self, device_id: int) -> None:
         """Видаляє маршрут."""
         with self.lock:
             self.routes.pop(device_id, None)
+        self.save_cache()
+
+    def toggle_route(self, device_id: int) -> bool:
+        """Вмикає або зупиняє стрім для конкретного авто."""
+        with self.lock:
+            if device_id in self.routes:
+                r = self.routes[device_id]
+                r.enabled = not r.enabled
+                if not r.enabled:
+                    r.status = "PAUSED"
+                elif self.is_running:
+                    r.status = "STREAMING" if r.packets_count > 0 else "WAITING"
+                res = r.enabled
+            else:
+                res = False
+        self.save_cache()
+        return res
 
     def get_routes(self) -> List[RouteItem]:
         """Повертає список копій поточних маршрутів."""
@@ -110,14 +179,21 @@ class MultiLiveRelayEngine:
             ignition = None
             driver = None
 
+            raw_items = []
             if attrs:
                 for k, v in attrs.items():
                     if not isinstance(v, (dict, list)):
                         params[k] = v
+                        raw_items.append(f"{k}={v}")
 
                 fuel = attrs.get("fuel") or attrs.get("can_fuel") or attrs.get("fuel1")
                 ignition = attrs.get("ignition")
                 driver = attrs.get("driverUniqueId") or attrs.get("driver")
+
+            if not raw_items:
+                raw_params_str = f"lat={pos.get('latitude')}, lon={pos.get('longitude')}, speed={speed_kmh}"
+            else:
+                raw_params_str = ", ".join(raw_items)
 
             # ВІДПРАВКА: суворо на Dev
             resp = requests.get(self.dev_target_url, params=params, timeout=4)
@@ -128,6 +204,8 @@ class MultiLiveRelayEngine:
                 else:
                     display_time = (datetime.now(timezone.utc) + timedelta(seconds=offset)).strftime("%H:%M:%S")
 
+                coords_str = f"{float(pos.get('latitude', 0.0)):.6f}, {float(pos.get('longitude', 0.0)):.6f}"
+
                 if resp.status_code == 200:
                     route.packets_count += 1
                     self.total_packets_forwarded += 1
@@ -135,6 +213,7 @@ class MultiLiveRelayEngine:
                     route.speed_kmh = speed_kmh
                     route.status = "STREAMING"
                     route.last_error = ""
+                    route.latest_params_raw = raw_params_str
 
                     if fuel is not None:
                         try:
@@ -147,31 +226,43 @@ class MultiLiveRelayEngine:
                     if driver:
                         route.driver = str(driver)
 
-                    self.packet_log.appendleft({
+                    log_entry = {
+                        "device_id": route.device_id,
                         "Час": display_time,
                         "Авто (Prod)": route.source_name,
-                        "Ціль (Dev)": route.target_unique_id,
-                        "Паливо": f"{fuel} л" if fuel is not None else "—",
+                        "ID (Dev)": route.target_unique_id,
+                        "Координати": coords_str,
                         "Швидкість": f"{speed_kmh} км/г",
-                        "Запалювання": "ВКЛ" if ignition else "ВИМК",
-                        "Водій": str(driver) if driver else "—",
+                        "Паливо": f"{fuel} л" if fuel is not None else "—",
+                        "Запалювання": "ВКЛ" if ignition is True else ("ВИМК" if ignition is False else "—"),
+                        "Картка водія": str(driver) if driver else "—",
+                        "Сирі параметри (Telemetry)": raw_params_str,
                         "Статус": "✅ 200 OK",
-                    })
+                    }
+                    route.packet_log.appendleft(log_entry)
+                    self.packet_log.appendleft(log_entry)
                     return True
                 else:
                     route.errors_count += 1
                     self.total_errors += 1
                     route.last_error = f"Dev HTTP {resp.status_code}"
-                    self.packet_log.appendleft({
+                    route.status = "ERROR"
+
+                    log_entry = {
+                        "device_id": route.device_id,
                         "Час": display_time,
                         "Авто (Prod)": route.source_name,
-                        "Ціль (Dev)": route.target_unique_id,
+                        "ID (Dev)": route.target_unique_id,
+                        "Координати": coords_str,
+                        "Швидкість": f"{speed_kmh} км/г",
                         "Паливо": "—",
-                        "Швидкість": "—",
                         "Запалювання": "—",
-                        "Водій": "—",
+                        "Картка водія": "—",
+                        "Сирі параметри (Telemetry)": raw_params_str,
                         "Статус": f"❌ Dev {resp.status_code}",
-                    })
+                    }
+                    route.packet_log.appendleft(log_entry)
+                    self.packet_log.appendleft(log_entry)
                     return False
 
         except Exception as e:
@@ -265,7 +356,8 @@ class MultiLiveRelayEngine:
         self.dev_target_url = dev_url.strip()
         self.tz_offset_sec = tz_offset_sec
         self.is_running = True
-        self.started_at = datetime.now().strftime("%H:%M:%S")
+        start_dt = datetime.now(timezone.utc) + timedelta(seconds=self.tz_offset_sec)
+        self.started_at = start_dt.strftime("%H:%M:%S")
 
         self.thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.thread.start()
