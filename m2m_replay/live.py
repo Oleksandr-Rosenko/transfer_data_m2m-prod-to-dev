@@ -109,18 +109,9 @@ class LiveRelayEngine:
                     self.stats["last_lat"] = params["lat"]
                     self.stats["last_lon"] = params["lon"]
 
-                    fuel_note = ""
                     if fuel is not None:
                         try:
                             f_num = float(fuel)
-                            if self.prev_fuel is not None:
-                                delta = round(f_num - self.prev_fuel, 1)
-                                if delta >= 5.0:
-                                    fuel_note = f" 🟢 +{delta}л (Заправка)"
-                                elif delta <= -5.0:
-                                    fuel_note = f" 🔴 {delta}л (Злив)"
-                                self.stats["fuel_delta"] = delta
-                            self.prev_fuel = f_num
                             self.stats["last_fuel"] = f_num
                             self.fuel_history.append({"time": now_str, "fuel": f_num})
                         except (ValueError, TypeError):
@@ -135,7 +126,7 @@ class LiveRelayEngine:
                         "Час": now_str,
                         "Джерело (Prod)": self.source_name,
                         "Ціль (Dev)": self.target_unique_id,
-                        "Паливо (л)": f"{fuel} л{fuel_note}" if fuel is not None else "—",
+                        "Паливо (л)": f"{fuel} л" if fuel is not None else "—",
                         "Швидкість": f"{speed_kmh} км/г",
                         "Запалювання": "ВКЛ" if ignition else "ВИМК",
                         "Картка тахо": str(driver) if driver else "—",
