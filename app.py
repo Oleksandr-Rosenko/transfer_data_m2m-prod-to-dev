@@ -27,7 +27,7 @@ except Exception:  # noqa: BLE001 — старіша база часових з�
 
 DEFAULT_PORTS = {"teltonika8e": "5027", "teltonika8": "5027", "wialon": "5039"}
 
-st.set_page_config(page_title="Перенос повідомлень Prod → Dev", layout="centered")
+st.set_page_config(page_title="M2M Bridge: Prod → Dev", layout="wide")
 S = st.session_state
 S.setdefault("client", None)
 S.setdefault("stage", "setup")      # setup | progress
@@ -652,6 +652,132 @@ def live_relay_page() -> None:
     engine = get_multi_live_engine()
     S.setdefault("live_inspect_did", None)
 
+    # Професійні стилі Shadcn UI / Material Design
+    st.markdown("""
+    <style>
+    /* Стилізація карток показників (KPI) */
+    .kpi-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px 16px;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+    }
+    .kpi-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 4px;
+    }
+    .kpi-val {
+        font-size: 20px;
+        font-weight: 700;
+        color: #0f172a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .kpi-sub {
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+    }
+
+    /* Компактна сітка параметрів авто */
+    .telemetry-grid {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 8px;
+        background: #f8fafc;
+        border: 1px solid #f1f5f9;
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-top: 8px;
+    }
+    .telemetry-item {
+        display: flex;
+        flex-direction: column;
+    }
+    .telemetry-label {
+        font-size: 10px;
+        color: #64748b;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 2px;
+    }
+    .telemetry-value {
+        font-size: 13px;
+        font-weight: 600;
+        color: #1e293b;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* Акуратні бейджі статусів */
+    .mui-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 8px;
+        border-radius: 9999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+    }
+    .mui-badge-live {
+        background-color: #ecfdf5;
+        color: #047857;
+        border: 1px solid #a7f3d0;
+    }
+    .mui-badge-wait {
+        background-color: #fffbeb;
+        color: #b45309;
+        border: 1px solid #fde68a;
+    }
+    .mui-badge-paused {
+        background-color: #f1f5f9;
+        color: #475569;
+        border: 1px solid #cbd5e1;
+    }
+    .mui-badge-stopped {
+        background-color: #f8fafc;
+        color: #94a3b8;
+        border: 1px solid #e2e8f0;
+    }
+    .mui-badge-error {
+        background-color: #fef2f2;
+        color: #b91c1c;
+        border: 1px solid #fecaca;
+    }
+    .mui-pulse {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: #10b981;
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+        animation: mui-pulse-anim 1.6s infinite;
+        display: inline-block;
+    }
+    @keyframes mui-pulse-anim {
+        0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+        70% { transform: scale(1); box-shadow: 0 0 0 5px rgba(16, 185, 129, 0); }
+        100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+    .mono-pill {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        background: #f1f5f9;
+        color: #334155;
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid #e2e8f0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.title("Онлайн ретрансляція")
     st.caption("Мульти-об'єктний міст телеметрії з Prod на Dev у реальному часі (до 10 об'єктів).")
     st.caption("🛡️ **Prod у режимі читання:** запити йдуть суворо на отримання точок без модифікації бойового сервера.")
@@ -697,7 +823,7 @@ def live_relay_page() -> None:
                 st.error(f"Не вдалося отримати список об'єктів: {e}")
         names = {d["id"]: d["name"] for d in devices}
 
-        col_sel, col_target, col_add = st.columns([3.2, 2.0, 1.2])
+        col_sel, col_target, col_add = st.columns([3.2, 2.0, 1.3])
         with col_sel:
             selected_did = st.selectbox(
                 "Пошук та вибір авто з Prod",
@@ -713,7 +839,7 @@ def live_relay_page() -> None:
         with col_add:
             st.write("")  # відступ під лейбл
             can_add = bool(connected and selected_did and target_id_val.strip() and len(current_routes) < 10)
-            if st.button("➕ Додати", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
+            if st.button("Додати авто", icon=":material/add:", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
                 src_name = names.get(selected_did, f"ID {selected_did}")
                 engine.add_route(selected_did, src_name, target_id_val.strip())
                 st.rerun()
@@ -729,71 +855,112 @@ def live_relay_page() -> None:
             is_active = engine.is_running
             started_at = engine.started_at
 
-        # Загальний моніторинг
+        # Загальний стан
         with st.container(border=True):
-            st.subheader("Загальний моніторинг ретрансляції")
-            c_btn, c_stat = st.columns([1.5, 2.5])
+            st.subheader("Загальний стан ретрансляції")
+            c_btn, c_stat = st.columns([1.3, 2.7])
             can_start = bool(connected and routes and dev_host.strip() and dev_port.strip())
 
             with c_btn:
                 if not is_active:
-                    btn_text = f"▶️ Запустити всі ({len(routes)})" if routes else "▶️ Запустити всі"
-                    if st.button(btn_text, type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
+                    btn_text = f"Запустити всі ({len(routes)})" if routes else "Запустити всі"
+                    if st.button(btn_text, icon=":material/play_arrow:", type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
                         engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
                         st.rerun()
                 else:
-                    if st.button("⏸️ Зупинити всі", type="secondary", use_container_width=True, key="live_stop_all"):
+                    if st.button("Зупинити всі", icon=":material/pause:", type="secondary", use_container_width=True, key="live_stop_all"):
                         engine.stop()
                         st.rerun()
 
             with c_stat:
                 if is_active:
                     active_cnt = len([r for r in routes if r.enabled])
-                    st.success(f"🟢 **В ефірі:** стрім для {active_cnt} із {len(routes)} авто (активовано з {started_at})")
+                    st.markdown(f"""
+                    <div style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 8px 12px; display: flex; align-items: center; gap: 8px;">
+                        <span class="mui-badge mui-badge-live"><span class="mui-pulse"></span> В ЕФІРІ</span>
+                        <span style="font-size: 13px; color: #065f46; font-weight: 500;">
+                            Стрім для <b>{active_cnt}</b> із <b>{len(routes)}</b> авто (стартував о <b>{started_at}</b>)
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
-                    st.info("⏸️ **Ретрансляція зупинена.** Натисніть «Запустити всі» або старт на окремому авто.")
+                    st.markdown("""
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; display: flex; align-items: center; gap: 8px;">
+                        <span class="mui-badge mui-badge-stopped">ЗУПИНЕНО</span>
+                        <span style="font-size: 13px; color: #64748b;">
+                            Ретрансляція вимкнена. Натисніть «Запустити всі» або кнопку старту на потрібному авто.
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-            st.divider()
+            st.write("")
 
-            # 3 зрозумілі та чіткі KPI-картки
+            # 3 чіткі KPI-картки в стилі Shadcn UI
             k1, k2, k3 = st.columns(3)
             with k1:
-                st.metric("📦 Передано пакетів", f"{total_sent} шт")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-title">Передано пакетів</div>
+                    <div class="kpi-val">{total_sent} <span style="font-size: 13px; font-weight: normal; color: #64748b;">точок</span></div>
+                    <div class="kpi-sub">Успішно доставлено на Dev</div>
+                </div>
+                """, unsafe_allow_html=True)
             with k2:
                 active_cnt = len([r for r in routes if r.enabled]) if is_active else 0
-                st.metric("🚗 Активних авто", f"{active_cnt} / {len(routes)}")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-title">Активних авто</div>
+                    <div class="kpi-val">{active_cnt} <span style="font-size: 13px; font-weight: normal; color: #64748b;">з {len(routes)}</span></div>
+                    <div class="kpi-sub">В режимі онлайн-стріму</div>
+                </div>
+                """, unsafe_allow_html=True)
             with k3:
-                st.metric("🎯 Dev Сервер", f"{dev_host.strip()}:{dev_port.strip()}")
+                err_sub = f"Помилок Dev: {total_errs}" if total_errs > 0 else "0 помилок зв'язку"
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-title">Сервер призначення</div>
+                    <div class="kpi-val" style="font-size: 18px;">{dev_host.strip()}:{dev_port.strip()}</div>
+                    <div class="kpi-sub">{err_sub}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
         # Автопарк на ретрансляції (статуси + кнопки для кожного авто)
         st.subheader(f"Автопарк на ретрансляції ({len(routes)} / 10)")
         if not routes:
-            st.caption("Маршрути ще не додані. Оберіть авто вище та натисніть «➕ Додати».")
+            st.caption("Маршрути ще не додані. Оберіть авто вище та натисніть «Додати авто».")
         else:
             for r in routes:
                 with st.container(border=True):
                     # Заголовок картки авто з бейджем статусу та кнопками керування
-                    c_head, c_tog, c_pts, c_del = st.columns([3.8, 1.2, 1.3, 0.7])
+                    c_head, c_tog, c_pts, c_del = st.columns([4.2, 1.2, 1.2, 0.6])
                     with c_head:
                         if not is_active:
-                            badge = "⏸️ ЗУПИНЕНО"
+                            badge_html = '<span class="mui-badge mui-badge-stopped">ЗУПИНЕНО</span>'
                         elif not r.enabled:
-                            badge = "⏸️ НА ПАУЗІ"
+                            badge_html = '<span class="mui-badge mui-badge-paused">НА ПАУЗІ</span>'
                         elif r.status == "STREAMING":
-                            badge = "🟢 В ЕФІРІ"
+                            badge_html = '<span class="mui-badge mui-badge-live"><span class="mui-pulse"></span> В ЕФІРІ</span>'
                         elif r.status == "ERROR":
-                            badge = f"🔴 Dev {r.last_error or 'Помилка'}"
+                            badge_html = f'<span class="mui-badge mui-badge-error">DEV {r.last_error or "ПОМИЛКА"}</span>'
                         else:
-                            badge = "🟡 ОЧІКУВАННЯ"
-                        st.markdown(f"**{badge}** &nbsp; | &nbsp; **{r.source_name}** ➔ `{r.target_unique_id}`")
+                            badge_html = '<span class="mui-badge mui-badge-wait">ОЧІКУВАННЯ</span>'
+
+                        st.markdown(f"""
+                        <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                            {badge_html}
+                            <span style="font-size: 15px; font-weight: 600; color: #0f172a;">{r.source_name}</span>
+                            <span style="color: #94a3b8; font-size: 13px;">➔</span>
+                            <span class="mono-pill">{r.target_unique_id}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
 
                     with c_tog:
                         if r.enabled and is_active:
-                            if st.button("⏸️ Пауза", key=f"tog_{r.device_id}", use_container_width=True):
+                            if st.button("Пауза", icon=":material/pause:", key=f"tog_{r.device_id}", use_container_width=True):
                                 engine.toggle_route(r.device_id)
                                 st.rerun()
                         else:
-                            if st.button("▶️ Старт", key=f"tog_{r.device_id}", use_container_width=True):
+                            if st.button("Старт", icon=":material/play_arrow:", key=f"tog_{r.device_id}", use_container_width=True):
                                 engine.toggle_route(r.device_id)
                                 if not is_active and can_start:
                                     engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
@@ -801,32 +968,57 @@ def live_relay_page() -> None:
 
                     with c_pts:
                         is_inspecting = (S.get("live_inspect_did") == r.device_id)
-                        btn_label = "✕ Сховати" if is_inspecting else "📋 Точки"
-                        if st.button(btn_label, key=f"insp_{r.device_id}", use_container_width=True):
+                        btn_label = "Сховати" if is_inspecting else "Точки"
+                        btn_icon = ":material/close:" if is_inspecting else ":material/terminal:"
+                        if st.button(btn_label, icon=btn_icon, key=f"insp_{r.device_id}", use_container_width=True):
                             S.live_inspect_did = None if is_inspecting else r.device_id
                             st.rerun()
 
                     with c_del:
-                        if st.button("🗑️", key=f"del_{r.device_id}", help="Видалити це авто з конфігурації"):
+                        if st.button("", icon=":material/delete:", key=f"del_{r.device_id}", help="Видалити це авто з конфігурації"):
                             engine.remove_route(r.device_id)
                             if S.get("live_inspect_did") == r.device_id:
                                 S.live_inspect_did = None
                             st.rerun()
 
-                    # Живі показники останнього пакету
-                    m1, m2, m3, m4, m5, m6 = st.columns(6)
-                    m1.metric("Швидкість", f"{r.speed_kmh} км/г")
-                    m2.metric("Паливо", f"{r.fuel} л" if r.fuel is not None else "—")
-                    ign_disp = "ВКЛ" if r.ignition is True else ("ВИМК" if r.ignition is False else "—")
-                    m3.metric("Запалювання", ign_disp)
-                    m4.metric("Картка тахо", r.driver or "—")
-                    m5.metric("Останній час", r.last_time)
-                    m6.metric("Пакети", f"{r.packets_count} (пом: {r.errors_count})")
+                    # Акуратна сітка параметрів замість гігантських метрик
+                    fuel_disp = f"{r.fuel} л" if r.fuel is not None else "—"
+                    ign_disp = "ON" if r.ignition is True else ("OFF" if r.ignition is False else "—")
+                    driver_disp = r.driver or "—"
+
+                    st.markdown(f"""
+                    <div class="telemetry-grid">
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Швидкість</span>
+                            <span class="telemetry-value">{r.speed_kmh} км/г</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Паливо</span>
+                            <span class="telemetry-value">{fuel_disp}</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Запалювання</span>
+                            <span class="telemetry-value">{ign_disp}</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Картка тахо</span>
+                            <span class="telemetry-value">{driver_disp}</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Останній час</span>
+                            <span class="telemetry-value">{r.last_time}</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Пакети / Помилки</span>
+                            <span class="telemetry-value">{r.packets_count} / {r.errors_count}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
                     # Вікно детальних лайв-точок саме цього об'єкта
                     if S.get("live_inspect_did") == r.device_id:
                         st.divider()
-                        st.markdown(f"##### 📋 Останні передані точки телеметрії: **{r.source_name}**")
+                        st.markdown(f"##### Журнал точок телеметрії: **{r.source_name}**")
                         car_logs = list(r.packet_log)
                         if car_logs:
                             df_car = pd.DataFrame(car_logs)

@@ -237,7 +237,7 @@ class MultiLiveRelayEngine:
                         "Запалювання": "ВКЛ" if ignition is True else ("ВИМК" if ignition is False else "—"),
                         "Картка водія": str(driver) if driver else "—",
                         "Сирі параметри (Telemetry)": raw_params_str,
-                        "Статус": "✅ 200 OK",
+                        "Статус": "200 OK",
                     }
                     route.packet_log.appendleft(log_entry)
                     self.packet_log.appendleft(log_entry)
@@ -259,7 +259,7 @@ class MultiLiveRelayEngine:
                         "Запалювання": "—",
                         "Картка водія": "—",
                         "Сирі параметри (Telemetry)": raw_params_str,
-                        "Статус": f"❌ Dev {resp.status_code}",
+                        "Статус": f"Dev {resp.status_code}",
                     }
                     route.packet_log.appendleft(log_entry)
                     self.packet_log.appendleft(log_entry)
