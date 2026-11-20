@@ -18,7 +18,7 @@ from m2m_replay.order import (
     export_rows, fmt_local, mileage_mismatch, rows_to_csv, scan_pages, segment_reason,
 )
 from m2m_replay.replay import PROTOCOLS, TransferConfig, TransferJob, build_preview, check_connection
-from m2m_replay.live import get_live_engine
+from m2m_replay.live import get_multi_live_engine
 
 try:
     LOCAL_TZ = ZoneInfo("Europe/Kyiv")
@@ -645,23 +645,38 @@ def fix_page() -> None:
             new_job.start()
             st.rerun()
 
-# ---------------------------------------------------------------- екран 3: онлайн ретрансляція
+# ---------------------------------------------------------------- екран 3: онлайн ретрансляція (мульти-об'єкт)
 def live_relay_page() -> None:
     client: M2MClient | None = S.client
     connected = bool(client and client.token)
-    engine = get_live_engine()
+    engine = get_multi_live_engine()
 
     st.title("Онлайн ретрансляція")
-    st.caption("Пряме дублювання потоку телеметрії з Prod на Dev у реальному часі.")
-    st.caption("🛡️ **Prod у режимі читання:** підключення виконується через WebSocket `api/socket` без модифікації бойового сервера. Точки надсилаються виключно на Dev.")
+    st.caption("Мульти-об'єктний стрім телеметрії з Prod на Dev у реальному часі (до 10 об'єктів).")
+    st.caption("🛡️ **Prod у режимі читання:** запити йдуть суворо на отримання точок без модифікації бойового сервера.")
 
     if not connected:
         st.info("Увійдіть у Prod у бічній панелі ліворуч.")
 
-    # 1. Джерело (Prod)
+    # 1. Призначення (Dev)
     with st.container(border=True):
-        st.subheader("1. Об'єкт-джерело (Prod)")
-        q = st.text_input("Пошук об'єкта", placeholder="Назва або IMEI", key="live_q", disabled=not connected)
+        st.subheader("1. Куди транслюємо (Dev)")
+        c1, c2 = st.columns([3, 1])
+        dev_host = c1.text_input("Домен або IP dev-сервера", value=secret("DEV_HOST", "dev.m2m-ua.com"), key="live_host")
+        dev_port = c2.text_input("Порт (OsmAnd)", value="5055", key="live_port")
+        clean_host = dev_host.strip()
+        if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
+            dev_target_url = f"http://{clean_host}:{dev_port.strip()}"
+        else:
+            dev_target_url = f"{clean_host}:{dev_port.strip()}"
+
+    # 2. Додавання об'єктів у список (до 10)
+    current_routes = engine.get_routes()
+    with st.container(border=True):
+        st.subheader("2. Маршрути авто (до 10 об'єктів)")
+        
+        # Пошук та вибір авто з Prod
+        q = st.text_input("Пошук авто в Prod", placeholder="Назва або IMEI", key="live_search_car", disabled=not connected)
         devices: list[dict] = []
         if connected:
             try:
@@ -669,109 +684,109 @@ def live_relay_page() -> None:
             except ApiError as e:
                 st.error(f"Не вдалося отримати список об'єктів: {e}")
         names = {d["id"]: d["name"] for d in devices}
-        device_id = st.selectbox(
-            "Об'єкт",
-            options=list(names),
-            format_func=lambda i: f"{names[i]} (ID {i})",
-            disabled=not devices,
-            key="live_src_device",
-        )
-        if connected:
-            st.caption(f"Знайдено об'єктів: {len(devices)}.")
 
-    # 2. Призначення (Dev)
-    with st.container(border=True):
-        st.subheader("2. Куди транслюємо (Dev)")
-        c1, c2, c3 = st.columns([2, 1, 2])
-        dev_host = c1.text_input("Домен або IP dev-сервера", value=secret("DEV_HOST", "dev.m2m-ua.com"), key="live_host")
-        dev_port = c2.text_input("Порт (OsmAnd)", value="5055", key="live_port")
-        dev_target_id = c3.text_input("ID об'єкта на dev", value="dev-tacho-1", key="live_target_id")
-        st.caption("Об'єкт із цим ID/IMEI має бути створений на dev. Дані передаються в порт OsmAnd 5055 зі збереженням датчиків палива та тахографа.")
+        col_sel, col_target, col_add = st.columns([3, 2, 1])
+        with col_sel:
+            selected_did = st.selectbox(
+                "Авто з Prod",
+                options=list(names),
+                format_func=lambda i: f"{names[i]} (ID {i})",
+                disabled=not devices,
+                key="multi_select_car"
+            )
+        with col_target:
+            suggested_id = f"dev-tacho-{len(current_routes) + 1}"
+            target_id_val = st.text_input("ID об'єкта на Dev", value=suggested_id, key="multi_target_id")
+        with col_add:
+            st.write("") # вертикальний відступ
+            can_add = bool(connected and selected_did and target_id_val.strip() and len(current_routes) < 10)
+            if st.button("➕ Додати", disabled=not can_add, use_container_width=True, key="multi_add_btn"):
+                src_name = names.get(selected_did, f"ID {selected_did}")
+                engine.add_route(selected_did, src_name, target_id_val.strip())
+                st.rerun()
+
+        # Список уже доданих маршрутів
+        if current_routes:
+            st.caption(f"Налаштовано об'єктів: {len(current_routes)} / 10")
+            for r in current_routes:
+                c_info, c_del = st.columns([5, 1])
+                with c_info:
+                    st.markdown(f"**{r.source_name}** ➡️ `{r.target_unique_id}`")
+                with c_del:
+                    if st.button("✕", key=f"del_route_{r.device_id}", disabled=engine.is_running):
+                        engine.remove_route(r.device_id)
+                        st.rerun()
+        else:
+            st.caption("Маршрути ще не додані. Оберіть авто, вкажіть його ID на Dev та натисніть «➕ Додати».")
 
     # 3. Керування ретрансляцією
-    can_start = bool(connected and device_id and dev_host.strip() and dev_port.strip() and dev_target_id.strip())
+    current_routes = engine.get_routes()
+    can_start = bool(connected and current_routes and dev_host.strip() and dev_port.strip())
+
     with st.container(border=True):
         col_btn, col_info = st.columns([1, 2])
         with col_btn:
             if not engine.is_running:
-                if st.button("Почати ретрансляцію", type="primary", disabled=not can_start, use_container_width=True, key="live_btn_start"):
-                    src_name = names.get(device_id, f"ID {device_id}")
-                    clean_host = dev_host.strip()
-                    if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
-                        dev_url = f"http://{clean_host}:{dev_port.strip()}"
-                    else:
-                        dev_url = f"{clean_host}:{dev_port.strip()}"
-
-                    engine.start(
-                        client=client,
-                        dev_url=dev_url,
-                        source_device_id=device_id,
-                        source_name=src_name,
-                        target_unique_id=dev_target_id.strip(),
-                    )
+                btn_label = f"Почати ретрансляцію ({len(current_routes)})" if current_routes else "Почати ретрансляцію"
+                if st.button(btn_label, type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
+                    engine.start(client=client, dev_url=dev_target_url)
                     st.rerun()
             else:
-                if st.button("Зупинити ретрансляцію", type="secondary", use_container_width=True, key="live_btn_stop"):
+                if st.button("Зупинити всі", type="secondary", use_container_width=True, key="live_stop_all"):
                     engine.stop()
                     st.rerun()
 
         with col_info:
-            if engine.status == "STREAMING":
-                st.success(f"🟢 **Активно:** {engine.source_name} ➡️ `{engine.target_unique_id}`")
-            elif engine.status == "CONNECTING":
-                st.warning("⏳ Підключення до сокета Prod...")
+            if engine.is_running:
+                st.success(f"🟢 **В ефірі:** активний стрім для {len(current_routes)} авто (з {engine.started_at})")
             else:
-                st.caption("Міст зупинено. Оберіть параметри та натисніть «Почати ретрансляцію».")
+                st.caption("Міст зупинено. Налаштуйте об'єкти та натисніть «Почати ретрансляцію».")
 
-    # 4. Онлайн-моніторинг (авто-оновлення що 2 сек)
+    # 4. Загальний дашборд та Live-статуси об'єктів (авто-оновлення що 2 сек)
     @st.fragment(run_every="2s")
-    def render_live_panel():
+    def render_multi_dashboard():
         with engine.lock:
-            stats = engine.stats.copy()
+            total_sent = engine.total_packets_forwarded
+            total_errs = engine.total_errors
+            routes = list(engine.routes.values())
             logs = list(engine.packet_log)
-            fuels = list(engine.fuel_history)
+            is_active = engine.is_running
 
         with st.container(border=True):
-            st.subheader("Показники в реальному часі")
-            
-            # Рядок 1 (по 3 колонки для нормальної ширини)
-            r1_1, r1_2, r1_3 = st.columns(3)
-            r1_1.metric("Передано на dev", fmt_n(stats["packets_forwarded"]))
-            fuel_s = f"{stats['last_fuel']} л" if stats['last_fuel'] is not None else "—"
-            r1_2.metric("Паливо (Live)", fuel_s)
-            r1_3.metric("Швидкість", f"{stats['last_speed']} км/г")
+            st.subheader("Загальний моніторинг")
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Всього на Dev", fmt_n(total_sent))
+            active_cnt = len([r for r in routes if r.enabled]) if is_active else 0
+            d2.metric("Активних авто", f"{active_cnt} / {len(routes)}")
+            d3.metric("Помилок Dev", total_errs)
+            d4.metric("Dev Сервер", "Порт 5055")
 
-            # Рядок 2
-            r2_1, r2_2, r2_3 = st.columns(3)
-            ign_s = "ВКЛ (ON)" if stats['last_ignition'] is True else ("ВИМК" if stats['last_ignition'] is False else "—")
-            r2_1.metric("Запалювання", ign_s)
-            r2_2.metric("Картка водія (Tacho)", stats["last_driver"] or "—")
-            r2_3.metric("Помилок відправки", stats["errors"])
+        if routes:
+            with st.container(border=True):
+                st.subheader("Статуси по кожному авто")
+                table_rows = []
+                for r in routes:
+                    st_label = "🟢 Стрімінг" if r.status == "STREAMING" else ("🔴 Помилка" if r.status == "ERROR" else "⚪ Очікування")
+                    fuel_text = f"{r.fuel} л" if r.fuel is not None else "—"
+                    ign_text = "ВКЛ (ON)" if r.ignition is True else ("ВИМК" if r.ignition is False else "—")
+                    table_rows.append({
+                        "Авто (Prod)": r.source_name,
+                        "ID на Dev": r.target_unique_id,
+                        "Швидкість": f"{r.speed_kmh} км/г",
+                        "Паливо": fuel_text,
+                        "Запалювання": ign_text,
+                        "Картка тахо": r.driver or "—",
+                        "Пакети": r.packets_count,
+                        "Останній час": r.last_time,
+                        "Статус": st_label
+                    })
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-        tab_feed, tab_chart, tab_map = st.tabs(["Потік точок", "Графік палива", "Локація на карті"])
-        with tab_feed:
-            if logs:
+        if logs:
+            with st.expander("Останні передані точки (Live Feed)", expanded=False):
                 st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
-            else:
-                st.caption("Очікування нових точок від обраного об'єкта...")
 
-        with tab_chart:
-            if fuels and len(fuels) > 1:
-                df_f = pd.DataFrame(fuels)
-                st.line_chart(df_f.set_index("time")["fuel"], height=220)
-                st.caption("Стрибок угору — заправка, падіння при нульовій швидкості — злив.")
-            else:
-                st.caption("Дані палива з'являться на графіку під час надходження нових повідомлень.")
-
-        with tab_map:
-            if stats["last_lat"] and stats["last_lon"]:
-                df_pos = pd.DataFrame([{"lat": stats["last_lat"], "lon": stats["last_lon"]}])
-                st.map(df_pos, zoom=14, height=260)
-                st.caption(f"Останні координати: {stats['last_lat']}, {stats['last_lon']} (оновлено: {stats['last_time']})")
-            else:
-                st.caption("Координати ще не надходили.")
-
-    render_live_panel()
+    render_multi_dashboard()
 
 # ---------------------------------------------------------------- запуск
 sidebar_login()
