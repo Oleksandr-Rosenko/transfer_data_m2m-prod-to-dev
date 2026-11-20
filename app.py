@@ -661,9 +661,23 @@ def live_relay_page() -> None:
     # 1. Призначення (Dev)
     with st.container(border=True):
         st.subheader("1. Куди транслюємо (Dev)")
-        c1, c2 = st.columns([3, 1])
+        c1, c2, c3 = st.columns([2.5, 1.2, 1.8])
         dev_host = c1.text_input("Домен або IP dev-сервера", value=secret("DEV_HOST", "dev.m2m-ua.com"), key="live_host")
         dev_port = c2.text_input("Порт (OsmAnd)", value="5055", key="live_port")
+        tz_choice = c3.selectbox(
+            "Часовий пояс Dev",
+            options=["+2 год (Київ, зима)", "+3 год (Київ, літо)", "+0 год (UTC)"],
+            index=0,
+            key="live_tz_opt",
+            help="Коригує мітку часу для протоколу OsmAnd під час запису в БД Dev."
+        )
+        tz_map = {
+            "+2 год (Київ, зима)": 7200,
+            "+3 год (Київ, літо)": 10800,
+            "+0 год (UTC)": 0,
+        }
+        tz_offset_sec = tz_map.get(tz_choice, 7200)
+
         clean_host = dev_host.strip()
         if not clean_host.startswith("http://") and not clean_host.startswith("https://"):
             dev_target_url = f"http://{clean_host}:{dev_port.strip()}"
@@ -729,7 +743,7 @@ def live_relay_page() -> None:
             if not engine.is_running:
                 btn_label = f"Почати ретрансляцію ({len(current_routes)})" if current_routes else "Почати ретрансляцію"
                 if st.button(btn_label, type="primary", disabled=not can_start, use_container_width=True, key="live_start_all"):
-                    engine.start(client=client, dev_url=dev_target_url)
+                    engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
                     st.rerun()
             else:
                 if st.button("Зупинити всі", type="secondary", use_container_width=True, key="live_stop_all"):

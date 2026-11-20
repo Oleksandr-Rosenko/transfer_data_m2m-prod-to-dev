@@ -50,6 +50,7 @@ class MultiLiveRelayEngine:
         self.thread: Optional[threading.Thread] = None
         self.client = None
         self.dev_target_url = ""
+        self.tz_offset_sec = 7200  # За замовчуванням +2 години (Київський час)
 
         # Словник маршрутів {device_id: RouteItem}
         self.routes: Dict[int, RouteItem] = {}
@@ -88,7 +89,9 @@ class MultiLiveRelayEngine:
         """Пересилає точку конкретного авто на Dev."""
         try:
             dt = parse_ts(pos.get("deviceTime") or pos.get("fixTime"))
-            ts = int(dt.timestamp()) if dt else int(time.time())
+            raw_ts = int(dt.timestamp()) if dt else int(time.time())
+            offset = getattr(self, "tz_offset_sec", 7200)
+            ts = raw_ts + offset
 
             speed_kmh = round(float(pos.get("speed", 0.0) or 0.0), 1)
 
@@ -120,11 +123,15 @@ class MultiLiveRelayEngine:
             resp = requests.get(self.dev_target_url, params=params, timeout=4)
 
             with self.lock:
-                now_str = datetime.now().strftime("%H:%M:%S")
+                if dt:
+                    display_time = (dt + timedelta(seconds=offset)).strftime("%H:%M:%S")
+                else:
+                    display_time = (datetime.now(timezone.utc) + timedelta(seconds=offset)).strftime("%H:%M:%S")
+
                 if resp.status_code == 200:
                     route.packets_count += 1
                     self.total_packets_forwarded += 1
-                    route.last_time = now_str
+                    route.last_time = display_time
                     route.speed_kmh = speed_kmh
                     route.status = "STREAMING"
                     route.last_error = ""
@@ -141,7 +148,7 @@ class MultiLiveRelayEngine:
                         route.driver = str(driver)
 
                     self.packet_log.appendleft({
-                        "Час": now_str,
+                        "Час": display_time,
                         "Авто (Prod)": route.source_name,
                         "Ціль (Dev)": route.target_unique_id,
                         "Паливо": f"{fuel} л" if fuel is not None else "—",
@@ -156,7 +163,7 @@ class MultiLiveRelayEngine:
                     self.total_errors += 1
                     route.last_error = f"Dev HTTP {resp.status_code}"
                     self.packet_log.appendleft({
-                        "Час": now_str,
+                        "Час": display_time,
                         "Авто (Prod)": route.source_name,
                         "Ціль (Dev)": route.target_unique_id,
                         "Паливо": "—",
@@ -249,13 +256,14 @@ class MultiLiveRelayEngine:
             for r in self.routes.values():
                 r.status = "IDLE"
 
-    def start(self, client, dev_url: str) -> None:
+    def start(self, client, dev_url: str, tz_offset_sec: int = 7200) -> None:
         """Запуск ретрансляції всіх налаштованих авто."""
         if self.is_running:
             return
 
         self.client = client
         self.dev_target_url = dev_url.strip()
+        self.tz_offset_sec = tz_offset_sec
         self.is_running = True
         self.started_at = datetime.now().strftime("%H:%M:%S")
 

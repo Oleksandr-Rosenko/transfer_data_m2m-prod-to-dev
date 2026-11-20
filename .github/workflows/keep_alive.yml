@@ -1,0 +1,48 @@
+name: Keep Streamlit App Alive
+
+on:
+  schedule:
+    # Запуск кожні 5 хвилин для запобігання засинанню Streamlit Cloud (таймаут неактивності ~15 хв)
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'URL вашого Streamlit-додатку (залиште порожнім для використання за замовчуванням)'
+        required: false
+        default: 'https://transfer-data-m2m-prod-to-dev.streamlit.app'
+
+jobs:
+  ping:
+    name: Ping Streamlit Container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send keep-alive HTTP request
+        env:
+          DEFAULT_URL: 'https://transfer-data-m2m-prod-to-dev.streamlit.app'
+          SECRET_URL: ${{ secrets.STREAMLIT_URL }}
+          VAR_URL: ${{ vars.STREAMLIT_URL }}
+          INPUT_URL: ${{ inputs.app_url }}
+        run: |
+          # Визначаємо цільовий URL за пріоритетом: ручний ввід -> секрет -> змінна -> дефолт
+          TARGET_URL="${INPUT_URL:-${SECRET_URL:-${VAR_URL:-$DEFAULT_URL}}}"
+          echo "🎯 Цільовий URL: $TARGET_URL"
+          echo "🕒 Час пінгу (UTC): $(date -u)"
+
+          # Виконуємо HTTP GET запит з браузерним User-Agent
+          RESPONSE=$(curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (StreamlitKeepAlive/1.0)" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -w "\n%{http_code}|%{time_total}" \
+            "$TARGET_URL")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1 | cut -d'|' -f1)
+          TOTAL_TIME=$(echo "$RESPONSE" | tail -n1 | cut -d'|' -f2)
+
+          echo "📊 HTTP Status Code: $HTTP_CODE"
+          echo "⏱️ Час відповіді: ${TOTAL_TIME}с"
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+            echo "✅ Додаток активний! Streamlit контейнер не засне."
+          else
+            echo "⚠️ Отримано статус $HTTP_CODE. Якщо додаток спав — він прокидається."
+          fi
