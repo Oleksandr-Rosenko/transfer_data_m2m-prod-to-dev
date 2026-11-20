@@ -19,10 +19,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
 from .models import parse_attributes, parse_ts
+
+try:
+    KYIV_TZ = ZoneInfo("Europe/Kyiv")
+except Exception:
+    KYIV_TZ = ZoneInfo("Europe/Kiev")
 
 
 @dataclass
@@ -37,6 +43,7 @@ class RouteItem:
     errors_count: int = 0
     last_time: str = "—"
     speed_kmh: float = 0.0
+    coords_str: str = "—"
     fuel: Optional[float] = None
     ignition: Optional[bool] = None
     driver: Optional[str] = None
@@ -142,6 +149,7 @@ class MultiLiveRelayEngine:
                 if not r.enabled:
                     r.status = "PAUSED"
                 elif self.is_running:
+                    r.last_seen_id = None
                     r.status = "STREAMING" if r.packets_count > 0 else "WAITING"
         self.save_cache()
 
@@ -154,6 +162,7 @@ class MultiLiveRelayEngine:
                 if not r.enabled:
                     r.status = "PAUSED"
                 elif self.is_running:
+                    r.last_seen_id = None
                     r.status = "STREAMING" if r.packets_count > 0 else "WAITING"
                 res = r.enabled
             else:
@@ -169,17 +178,20 @@ class MultiLiveRelayEngine:
     def forward_single_point(self, route: RouteItem, pos: Dict[str, Any]) -> bool:
         """Пересилає точку конкретного авто на Dev."""
         try:
-            dt = parse_ts(pos.get("deviceTime") or pos.get("fixTime"))
+            dt = parse_ts(pos.get("deviceTime") or pos.get("fixTime") or pos.get("serverTime"))
             raw_ts = int(dt.timestamp()) if dt else int(time.time())
             offset = getattr(self, "tz_offset_sec", 7200)
             ts = raw_ts + offset
 
             speed_kmh = round(float(pos.get("speed", 0.0) or 0.0), 1)
+            lat = float(pos.get("latitude", 0.0) or 0.0)
+            lon = float(pos.get("longitude", 0.0) or 0.0)
+            coords_str = f"{lat:.6f}, {lon:.6f}"
 
             params: Dict[str, Any] = {
                 "id": route.target_unique_id,
-                "lat": pos.get("latitude", 0.0),
-                "lon": pos.get("longitude", 0.0),
+                "lat": lat,
+                "lon": lon,
                 "timestamp": ts,
                 "speed": round(speed_kmh * 0.277778, 2),  # км/г -> м/с
                 "bearing": int(pos.get("course", 0) or 0),
@@ -187,10 +199,6 @@ class MultiLiveRelayEngine:
             }
 
             attrs = parse_attributes(pos.get("attributes"))
-            fuel = None
-            ignition = None
-            driver = None
-
             raw_items = []
             if attrs:
                 for k, v in attrs.items():
@@ -198,45 +206,31 @@ class MultiLiveRelayEngine:
                         params[k] = v
                         raw_items.append(f"{k}={v}")
 
-                fuel = attrs.get("fuel") or attrs.get("can_fuel") or attrs.get("fuel1")
-                ignition = attrs.get("ignition")
-                driver = attrs.get("driverUniqueId") or attrs.get("driver")
-
             if not raw_items:
-                raw_params_str = f"lat={pos.get('latitude')}, lon={pos.get('longitude')}, speed={speed_kmh}"
+                raw_params_str = f"lat={lat}, lon={lon}, speed={speed_kmh}"
             else:
                 raw_params_str = ", ".join(raw_items)
 
             # ВІДПРАВКА: суворо на Dev
             resp = requests.get(self.dev_target_url, params=params, timeout=4)
 
+            # Відображення часу суворо за київським часом (Europe/Kyiv)
+            if dt:
+                kyiv_dt = dt.astimezone(KYIV_TZ)
+                display_time = kyiv_dt.strftime("%H:%M:%S")
+            else:
+                display_time = datetime.now(KYIV_TZ).strftime("%H:%M:%S")
+
             with self.lock:
-                if dt:
-                    display_time = (dt + timedelta(seconds=offset)).strftime("%H:%M:%S")
-                else:
-                    display_time = (datetime.now(timezone.utc) + timedelta(seconds=offset)).strftime("%H:%M:%S")
-
-                coords_str = f"{float(pos.get('latitude', 0.0)):.6f}, {float(pos.get('longitude', 0.0)):.6f}"
-
                 if resp.status_code == 200:
                     route.packets_count += 1
                     self.total_packets_forwarded += 1
                     route.last_time = display_time
                     route.speed_kmh = speed_kmh
+                    route.coords_str = coords_str
                     route.status = "STREAMING"
                     route.last_error = ""
                     route.latest_params_raw = raw_params_str
-
-                    if fuel is not None:
-                        try:
-                            route.fuel = float(fuel)
-                        except (ValueError, TypeError):
-                            pass
-
-                    if ignition is not None:
-                        route.ignition = bool(ignition)
-                    if driver:
-                        route.driver = str(driver)
 
                     log_entry = {
                         "device_id": route.device_id,
@@ -245,11 +239,8 @@ class MultiLiveRelayEngine:
                         "ID (Dev)": route.target_unique_id,
                         "Координати": coords_str,
                         "Швидкість": f"{speed_kmh} км/г",
-                        "Паливо": f"{fuel} л" if fuel is not None else "—",
-                        "Запалювання": "ВКЛ" if ignition is True else ("ВИМК" if ignition is False else "—"),
-                        "Картка водія": str(driver) if driver else "—",
-                        "Сирі параметри (Telemetry)": raw_params_str,
                         "Статус": "200 OK",
+                        "Сирі параметри (Telemetry)": raw_params_str,
                     }
                     route.packet_log.appendleft(log_entry)
                     self.packet_log.appendleft(log_entry)
@@ -267,11 +258,8 @@ class MultiLiveRelayEngine:
                         "ID (Dev)": route.target_unique_id,
                         "Координати": coords_str,
                         "Швидкість": f"{speed_kmh} км/г",
-                        "Паливо": "—",
-                        "Запалювання": "—",
-                        "Картка водія": "—",
-                        "Сирі параметри (Telemetry)": raw_params_str,
                         "Статус": f"Dev {resp.status_code}",
+                        "Сирі параметри (Telemetry)": raw_params_str,
                     }
                     route.packet_log.appendleft(log_entry)
                     self.packet_log.appendleft(log_entry)
@@ -286,33 +274,6 @@ class MultiLiveRelayEngine:
 
     def _worker_loop(self) -> None:
         """Головний цикл багатопотокової ретрансляції."""
-        # 1. Початковий якір для всіх зареєстрованих авто (миттєвий старт)
-        with self.lock:
-            active_routes = [r for r in self.routes.values() if r.enabled]
-
-        now = datetime.now(timezone.utc)
-        t_from_init = (now - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        t_to_init = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        for r in active_routes:
-            try:
-                res = self.client.positions_page(
-                    did=r.device_id,
-                    date_from=t_from_init,
-                    date_to=t_to_init,
-                    page=1,
-                    per_page=3,
-                    order="DESC",
-                )
-                items = res.get("items", [])
-                if items:
-                    latest = items[0]
-                    r.last_seen_id = latest.get("id")
-                    self.forward_single_point(r, latest)
-            except Exception:
-                pass
-
-        # 2. Неперервний смарт-цикл опитування всіх авто
         while self.is_running:
             with self.lock:
                 current_routes = [r for r in self.routes.values() if r.enabled]
@@ -321,36 +282,55 @@ class MultiLiveRelayEngine:
                 time.sleep(1)
                 continue
 
-            now = datetime.now(timezone.utc)
-            t_from = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            t_to = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now_kyiv = datetime.now(KYIV_TZ)
+            t_from = (now_kyiv - timedelta(minutes=30)).isoformat()
+            t_to = (now_kyiv + timedelta(minutes=5)).isoformat()
 
             for r in current_routes:
                 if not self.is_running:
                     break
                 try:
+                    # Запитуємо останні точки у зворотному порядку (найновіші перші)
                     res = self.client.positions_page(
                         did=r.device_id,
                         date_from=t_from,
                         date_to=t_to,
                         page=1,
-                        per_page=10,
-                        order="ASC",
+                        per_page=15,
+                        order="DESC",
                     )
                     items = res.get("items", [])
-                    for idx, pos in enumerate(items):
+                    if not items:
+                        continue
+
+                    # Якщо це перший запуск для цього авто — пересилаємо найостаннішу точку
+                    if r.last_seen_id is None:
+                        latest = items[0]
+                        r.last_seen_id = latest.get("id")
+                        self.forward_single_point(r, latest)
+                        continue
+
+                    # Відбираємо всі нові точки, які ще не пересилались
+                    candidates = []
+                    for pos in items:
                         pos_id = pos.get("id")
-                        if r.last_seen_id is None or (pos_id and pos_id > r.last_seen_id):
+                        if pos_id is not None and pos_id > r.last_seen_id:
+                            candidates.append(pos)
+
+                    # Сортуємо нові точки за порядком виникнення (ASC) для послідовної передачі
+                    if candidates:
+                        candidates.sort(key=lambda x: x.get("id", 0))
+                        for idx, pos in enumerate(candidates):
                             if idx > 0:
-                                time.sleep(0.1)
+                                time.sleep(0.05)
                             self.forward_single_point(r, pos)
-                            if pos_id:
-                                r.last_seen_id = pos_id
+                            r.last_seen_id = pos.get("id")
+
                 except Exception as e:
                     r.last_error = str(e)[:30]
 
-            # Пауза між колами опитування (2.5 секунди для свіжих даних)
-            for _ in range(25):
+            # Пауза між колами опитування (1.5 секунди для реактивності)
+            for _ in range(15):
                 if not self.is_running:
                     break
                 time.sleep(0.1)
@@ -366,9 +346,10 @@ class MultiLiveRelayEngine:
         self.tz_offset_sec = tz_offset_sec
 
         with self.lock:
-            # При запуску активуємо всі зареєстровані авто
+            # При запуску активуємо всі зареєстровані авто та скидаємо якір на найсвіжішу точку
             for r in self.routes.values():
                 r.enabled = True
+                r.last_seen_id = None
                 if r.status in ("IDLE", "PAUSED"):
                     r.status = "WAITING" if r.packets_count == 0 else "STREAMING"
 
@@ -378,8 +359,7 @@ class MultiLiveRelayEngine:
             return
 
         self.is_running = True
-        start_dt = datetime.now(timezone.utc) + timedelta(seconds=self.tz_offset_sec)
-        self.started_at = start_dt.strftime("%H:%M:%S")
+        self.started_at = datetime.now(KYIV_TZ).strftime("%H:%M:%S")
 
         self.thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.thread.start()

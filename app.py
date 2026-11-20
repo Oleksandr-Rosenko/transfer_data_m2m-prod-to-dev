@@ -686,7 +686,7 @@ def live_relay_page() -> None:
     /* Компактна сітка параметрів авто */
     .telemetry-grid {
         display: grid;
-        grid-template-columns: repeat(6, 1fr);
+        grid-template-columns: repeat(4, 1fr);
         gap: 8px;
         background: #f8fafc;
         border: 1px solid #f1f5f9;
@@ -998,9 +998,7 @@ def live_relay_page() -> None:
                             st.rerun()
 
                     # Акуратна сітка параметрів замість гігантських метрик
-                    fuel_disp = f"{r.fuel} л" if r.fuel is not None else "—"
-                    ign_disp = "ON" if r.ignition is True else ("OFF" if r.ignition is False else "—")
-                    driver_disp = r.driver or "—"
+                    coords_disp = getattr(r, "coords_str", "—") or "—"
 
                     st.markdown(f"""
                     <div class="telemetry-grid">
@@ -1009,16 +1007,8 @@ def live_relay_page() -> None:
                             <span class="telemetry-value">{r.speed_kmh} км/г</span>
                         </div>
                         <div class="telemetry-item">
-                            <span class="telemetry-label">Паливо</span>
-                            <span class="telemetry-value">{fuel_disp}</span>
-                        </div>
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Запалювання</span>
-                            <span class="telemetry-value">{ign_disp}</span>
-                        </div>
-                        <div class="telemetry-item">
-                            <span class="telemetry-label">Картка тахо</span>
-                            <span class="telemetry-value">{driver_disp}</span>
+                            <span class="telemetry-label">Координати</span>
+                            <span class="telemetry-value" style="font-family: monospace; font-size: 13px;">{coords_disp}</span>
                         </div>
                         <div class="telemetry-item">
                             <span class="telemetry-label">Останній час</span>
@@ -1044,12 +1034,17 @@ def live_relay_page() -> None:
                                 use_container_width=True,
                                 hide_index=True,
                                 column_config={
+                                    "Час": st.column_config.TextColumn("Час", width="small"),
+                                    "Авто (Prod)": st.column_config.TextColumn("Авто (Prod)", width="medium"),
+                                    "ID (Dev)": st.column_config.TextColumn("ID (Dev)", width="medium"),
+                                    "Координати": st.column_config.TextColumn("Координати", width="medium"),
+                                    "Швидкість": st.column_config.TextColumn("Швидкість", width="small"),
+                                    "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
                                     "Сирі параметри (Telemetry)": st.column_config.TextColumn(
                                         "Сирі параметри (Telemetry)",
-                                        help="Повний список датчиків та параметрів, які передав трекер на Dev",
+                                        help="Усі сирі атрибути та параметри точки з Prod, передані на Dev",
                                         width="large",
                                     ),
-                                    "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
                                 }
                             )
                         else:
@@ -1065,11 +1060,17 @@ def live_relay_page() -> None:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
+                        "Час": st.column_config.TextColumn("Час", width="small"),
+                        "Авто (Prod)": st.column_config.TextColumn("Авто (Prod)", width="medium"),
+                        "ID (Dev)": st.column_config.TextColumn("ID (Dev)", width="medium"),
+                        "Координати": st.column_config.TextColumn("Координати", width="medium"),
+                        "Швидкість": st.column_config.TextColumn("Швидкість", width="small"),
+                        "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
                         "Сирі параметри (Telemetry)": st.column_config.TextColumn(
                             "Сирі параметри (Telemetry)",
+                            help="Усі сирі атрибути та параметри точки з Prod, передані на Dev",
                             width="large",
                         ),
-                        "Статус": st.column_config.TextColumn("Статус Dev", width="small"),
                     }
                 )
 
