@@ -973,11 +973,11 @@ def live_relay_page() -> None:
                     with c_tog:
                         if r.enabled and is_active:
                             if st.button("Пауза", icon=":material/pause:", key=f"tog_{r.device_id}", use_container_width=True):
-                                engine.toggle_route(r.device_id)
+                                engine.set_route_enabled(r.device_id, False)
                                 st.rerun()
                         else:
                             if st.button("Старт", icon=":material/play_arrow:", key=f"tog_{r.device_id}", use_container_width=True):
-                                engine.toggle_route(r.device_id)
+                                engine.set_route_enabled(r.device_id, True)
                                 if not is_active and can_start:
                                     engine.start(client=client, dev_url=dev_target_url, tz_offset_sec=tz_offset_sec)
                                 st.rerun()

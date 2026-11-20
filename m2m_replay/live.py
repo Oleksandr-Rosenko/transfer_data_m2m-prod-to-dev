@@ -133,6 +133,18 @@ class MultiLiveRelayEngine:
             self.routes.pop(device_id, None)
         self.save_cache()
 
+    def set_route_enabled(self, device_id: int, enabled: bool) -> None:
+        """Явно вмикає або вимикає ретрансляцію для конкретного авто."""
+        with self.lock:
+            if device_id in self.routes:
+                r = self.routes[device_id]
+                r.enabled = enabled
+                if not r.enabled:
+                    r.status = "PAUSED"
+                elif self.is_running:
+                    r.status = "STREAMING" if r.packets_count > 0 else "WAITING"
+        self.save_cache()
+
     def toggle_route(self, device_id: int) -> bool:
         """Вмикає або зупиняє стрім для конкретного авто."""
         with self.lock:
@@ -310,8 +322,8 @@ class MultiLiveRelayEngine:
                 continue
 
             now = datetime.now(timezone.utc)
-            t_from = (now - timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            t_to = (now + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            t_from = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            t_to = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
             for r in current_routes:
                 if not self.is_running:
@@ -322,7 +334,7 @@ class MultiLiveRelayEngine:
                         date_from=t_from,
                         date_to=t_to,
                         page=1,
-                        per_page=3,
+                        per_page=10,
                         order="ASC",
                     )
                     items = res.get("items", [])
@@ -330,7 +342,7 @@ class MultiLiveRelayEngine:
                         pos_id = pos.get("id")
                         if r.last_seen_id is None or (pos_id and pos_id > r.last_seen_id):
                             if idx > 0:
-                                time.sleep(0.2)
+                                time.sleep(0.1)
                             self.forward_single_point(r, pos)
                             if pos_id:
                                 r.last_seen_id = pos_id
@@ -349,12 +361,22 @@ class MultiLiveRelayEngine:
 
     def start(self, client, dev_url: str, tz_offset_sec: int = 7200) -> None:
         """Запуск ретрансляції всіх налаштованих авто."""
-        if self.is_running:
-            return
-
         self.client = client
         self.dev_target_url = dev_url.strip()
         self.tz_offset_sec = tz_offset_sec
+
+        with self.lock:
+            # При запуску активуємо всі зареєстровані авто
+            for r in self.routes.values():
+                r.enabled = True
+                if r.status in ("IDLE", "PAUSED"):
+                    r.status = "WAITING" if r.packets_count == 0 else "STREAMING"
+
+        self.save_cache()
+
+        if self.is_running:
+            return
+
         self.is_running = True
         start_dt = datetime.now(timezone.utc) + timedelta(seconds=self.tz_offset_sec)
         self.started_at = start_dt.strftime("%H:%M:%S")
